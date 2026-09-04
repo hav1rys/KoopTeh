@@ -78,15 +78,24 @@ async function sendScheduleSnapshot(interaction, group, target, showGaps) {
   await interaction.editReply(menu.scheduleEmbed(data, url));
 }
 
+/**
+ * Перерисовывает сообщение-меню в экран расписания на дату target.
+ * Сначала мгновенный update() с «загрузкой» (надёжный отклик на первый клик),
+ * затем editReply() с готовым эмбедом.
+ */
+async function renderSchedule(interaction, uid, target) {
+  await interaction.update({
+    content: `⏳ Загружаю расписание на ${D.fmtDM(target)} (${D.weekdayRu(target)})…`,
+    embeds: [],
+    components: [],
+  });
+  const s = effState(uid);
+  const { data, url, error } = await safeSchedule(s.group, target, s.showGaps);
+  await interaction.editReply(menu.buildScheduleView(data, D.iso(target), url, error));
+}
+
 // uid -> список групп (для листания без повторной загрузки)
 const groupCache = new Map();
-
-async function groupsFor(uid) {
-  if (groupCache.has(uid)) return groupCache.get(uid);
-  const list = await ss.listAllGroups();
-  groupCache.set(uid, list);
-  return list;
-}
 
 // --------------------------------------------------------------------------
 // Discord client
@@ -183,7 +192,7 @@ async function onMenuButton(interaction) {
 
   switch (action) {
     case 'setgroup': {
-      await interaction.deferUpdate();
+      await interaction.update({ content: '⏳ Загружаю список групп…', embeds: [], components: [] });
       let view;
       try {
         const list = await ss.listAllGroups();
@@ -200,13 +209,9 @@ async function onMenuButton(interaction) {
       await interaction.editReply(view);
       return;
     }
-    case 'schedule': {
-      await interaction.deferUpdate();
-      const isoStr = D.iso(D.tomorrowParts());
-      const { data, url, error } = await safeSchedule(s.group, D.partsFromIso(isoStr), s.showGaps);
-      await interaction.editReply(menu.buildScheduleView(data, isoStr, url, error));
+    case 'schedule':
+      await renderSchedule(interaction, uid, D.tomorrowParts());
       return;
-    }
     case 'now':
       if (!s.group) {
         await interaction.reply({ content: 'Сначала укажи группу.' });
@@ -255,16 +260,20 @@ async function onGroupButton(interaction) {
   }
   if (rest.startsWith('page:')) {
     const page = Number(rest.slice('page:'.length)) || 0;
-    await interaction.deferUpdate();
-    let list;
+    if (groupCache.has(uid)) {
+      await interaction.update(menu.buildGroupPicker(groupCache.get(uid), page));
+      return;
+    }
+    // редкий случай: кэш пуст (перезапуск бота) — грузим заново с индикатором
+    await interaction.update({ content: '⏳ Обновляю список групп…', embeds: [], components: [] });
     try {
-      list = await groupsFor(uid);
+      const list = await ss.listAllGroups();
+      groupCache.set(uid, list);
+      await interaction.editReply(menu.buildGroupPicker(list, page));
     } catch (err) {
       log('WARN', `список групп: ${err.message}`);
       await interaction.editReply(menu.buildGroupPicker([], 0, { error: 'Не удалось загрузить список групп.' }));
-      return;
     }
-    await interaction.editReply(menu.buildGroupPicker(list, page));
   }
 }
 
@@ -308,9 +317,7 @@ async function onScheduleButton(interaction) {
     await interaction.reply({ content: 'Сначала укажи группу в меню (/start).' });
     return;
   }
-  await interaction.deferUpdate();
-  const { data, url, error } = await safeSchedule(s.group, target, s.showGaps);
-  await interaction.editReply(menu.buildScheduleView(data, D.iso(target), url, error));
+  await renderSchedule(interaction, uid, target);
 }
 
 async function onDaysButton(interaction) {
