@@ -5,8 +5,6 @@ const {
   GatewayIntentBits,
   Events,
   ActivityType,
-  ChannelType,
-  PermissionFlagsBits,
   SlashCommandBuilder,
   ApplicationIntegrationType,
   InteractionContextType,
@@ -17,7 +15,6 @@ const D = require('./dates');
 const storage = require('./storage');
 const ss = require('./scheduleSource');
 const render = require('./render');
-const server = require('./server');
 const menu = require('./menu');
 
 if (!cfg.token) {
@@ -165,72 +162,9 @@ async function showLookup(interaction, uid, kind, params, target, { fresh = fals
 // uid -> список групп (для листания)
 const groupCache = new Map();
 
-// -------- авто-роль группы на сервере PROVISION_GUILD_ID --------
-
-async function syncGroupRole(userId) {
-  if (!cfg.provisionGuildId) return;
-  const guild = client.guilds.cache.get(cfg.provisionGuildId);
-  if (!guild) return;
-  let member;
-  try {
-    member = await guild.members.fetch(userId);
-  } catch {
-    return; // не на сервере
-  }
-  if (!guild.roles.cache.size) await guild.roles.fetch().catch(() => {});
-
-  const s = storage.get(userId);
-  const groupName = s.role !== 'teacher' && s.group ? s.group : null;
-  const courseM = groupName && /^\s*([1-4])\d/.exec(groupName);
-  const courseName = courseM ? `${courseM[1]} курс` : null;
-  const teacherName = s.role === 'teacher' && s.teacherName ? 'Преподаватель' : null;
-  const guestName = !groupName && !teacherName ? 'Гость' : null;
-
-  let groupNames;
-  try {
-    groupNames = new Set(await ss.listAllGroups());
-  } catch {
-    groupNames = new Set();
-  }
-  if (groupName) groupNames.add(groupName);
-  const COURSE = new Set(['1 курс', '2 курс', '3 курс', '4 курс']);
-
-  const want = [groupName, courseName, teacherName, guestName].filter(Boolean);
-  const managed = new Set([...want, 'Преподаватель', 'Гость', ...COURSE]);
-
-  try {
-    for (const r of member.roles.cache.values()) {
-      const isGroupRole = groupNames.has(r.name);
-      if ((isGroupRole || managed.has(r.name)) && !want.includes(r.name)) {
-        await member.roles.remove(r, 'синхронизация ролей ботом').catch(() => {});
-      }
-    }
-    for (const name of want) {
-      if (member.roles.cache.some((r) => r.name === name)) continue;
-      const role = guild.roles.cache.find((r) => r.name === name);
-      if (role) await member.roles.add(role, 'роль из бота').catch(() => {});
-    }
-  } catch (err) {
-    log('WARN', `роли ${userId}: ${err.message}`);
-  }
-}
-
 // -------------------------------------------------------------------- клиент
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.DirectMessages,
-    ...(cfg.memberIntent ? [GatewayIntentBits.GuildMembers] : []),
-  ],
-});
-
-// Роль «Гость» сразу при входе (нужен MEMBER_INTENT=1 + включённый Server Members Intent).
-client.on(Events.GuildMemberAdd, async (member) => {
-  if (!cfg.provisionGuildId || member.guild.id !== cfg.provisionGuildId || member.user.bot) return;
-  const role = member.guild.roles.cache.find((r) => r.name === 'Гость');
-  if (role) await member.roles.add(role, 'вход на сервер').catch(() => {});
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages] });
 
 client.once(Events.ClientReady, async (c) => {
   log('INFO', `вошёл как ${c.user.tag} (id ${c.user.id})`);
@@ -303,12 +237,6 @@ function commandDefs() {
       .addStringOption((o) => o.setName('дата').setDescription('дд.мм')),
     new SlashCommandBuilder().setName('звонки').setDescription('Расписание звонков и текущий статус'),
     new SlashCommandBuilder().setName('admin').setDescription('Панель администратора'),
-    new SlashCommandBuilder()
-      .setName('setup-server')
-      .setDescription('Создать роли/категории/каналы под группы (только админ, на сервере)')
-      .addStringOption((o) =>
-        o.setName('группа').setDescription('Только одна группа (иначе — все)').setAutocomplete(true),
-      ),
   ];
 }
 
@@ -358,14 +286,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('mrn:')) return await onMorningButton(interaction);
       if (id.startsWith('ans:')) return await onAnswerButton(interaction);
       if (id.startsWith('adm:')) return await onAdminButton(interaction);
-      if (id.startsWith('chac:')) return await onChanAccessButton(interaction);
       return;
     }
     if (interaction.isStringSelectMenu() && interaction.customId === 'grp:pick') return await onGroupSelect(interaction);
-    if (interaction.isStringSelectMenu() && interaction.customId === 'chac:pick') return await onChanAccessPick(interaction);
-    if (interaction.isRoleSelectMenu() && interaction.customId.startsWith('chac:roles:')) {
-      return await onChanAccessRoles(interaction);
-    }
     if (interaction.isModalSubmit()) return await onModal(interaction);
   } catch (err) {
     log('ERROR', `interaction: ${err.stack || err}`);
@@ -380,67 +303,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 const CHOICE = (v) => ({ name: v.slice(0, 100), value: v.slice(0, 100) });
-
-async function onSetupServer(interaction, uid) {
-  if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.' }));
-  if (!interaction.inGuild() || !interaction.guild) {
-    return void (await interaction.reply({ content: 'Запусти команду на сервере.' }));
-  }
-  if (cfg.provisionGuildId && interaction.guildId !== cfg.provisionGuildId) {
-    return void (await interaction.reply({ content: 'Эта команда разрешена только на заданном сервере.' }));
-  }
-  const me = interaction.guild.members.me || (await interaction.guild.members.fetchMe().catch(() => null));
-  if (!me || !me.permissions.has([PermissionFlagsBits.ManageRoles, PermissionFlagsBits.ManageChannels])) {
-    return void (await interaction.reply({
-      content: 'Боту нужны права **Управление ролями** и **Управление каналами** на сервере.',
-    }));
-  }
-
-  const one = (interaction.options.getString('группа') || '').trim();
-  let groups;
-  try {
-    groups = one ? [one] : await ss.listAllGroups();
-  } catch (err) {
-    return void (await interaction.reply({ content: `Не удалось получить список групп: ${err.message}` }));
-  }
-  if (!groups.length) return void (await interaction.reply({ content: 'Список групп пуст.' }));
-
-  const perGroup = server.TEXT_CHANNELS.length + server.VOICE_CHANNELS.length + 1; // +категория
-  const limitWarn =
-    groups.length * perGroup > 480
-      ? `\n⚠️ У Discord лимит 500 каналов на сервер, а нужно ~${groups.length * perGroup}. Часть не создастся — запускай по одной группе (параметр «группа») или уменьши список.`
-      : '';
-  await interaction.reply({
-    content:
-      `Начинаю: ${groups.length} ${groups.length === 1 ? 'группа' : 'групп'}. ` +
-      `На группу: 1 роль, 1 категория, ${server.TEXT_CHANNELS.length + server.VOICE_CHANNELS.length} каналов. ` +
-      'Займёт несколько минут.' +
-      limitWarn,
-  });
-
-  const started = Date.now();
-  const onProgress = async (done, total, errors) => {
-    await interaction
-      .editReply({ content: `⏳ ${done}/${total}${errors.length ? ` · ошибок: ${errors.length}` : ''}` })
-      .catch(() => {});
-  };
-
-  let result;
-  try {
-    result = await server.provision(interaction.guild, interaction.client.user.id, groups, onProgress, {
-      common: !one,
-    });
-  } catch (err) {
-    log('ERROR', `setup-server: ${err.stack || err}`);
-    return void (await interaction.editReply({ content: `Сбой: ${err.message}` }).catch(() => {}));
-  }
-
-  const secs = Math.round((Date.now() - started) / 1000);
-  let msg = `✅ Готово: ${result.done}/${groups.length} за ${secs} с.`;
-  if (result.errors.length) msg += `\n⚠️ Ошибки (${result.errors.length}):\n` + result.errors.slice(0, 15).join('\n');
-  log('INFO', `setup-server от ${uid}: ${result.done} групп, ошибок ${result.errors.length}`);
-  await interaction.editReply({ content: msg.slice(0, 1990) }).catch(() => {});
-}
 
 async function onAutocomplete(interaction) {
   const f = interaction.options.getFocused(true); // { name, value }
@@ -462,18 +324,12 @@ async function onSlash(interaction) {
 
   if (name === 'start') {
     await interaction.reply(menuView(uid));
-    syncGroupRole(uid).catch(() => {});
     return;
   }
 
   if (name === 'admin') {
     if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.' }));
     await interaction.reply(menu.buildAdminMenu());
-    return;
-  }
-
-  if (name === 'setup-server') {
-    await onSetupServer(interaction, uid);
     return;
   }
 
@@ -629,7 +485,6 @@ async function onGroupSelect(interaction) {
   storage.setGroup(uid, interaction.values[0]);
   log('INFO', `${uid} выбрал группу "${interaction.values[0]}"`);
   await interaction.update(menuView(uid));
-  syncGroupRole(uid).catch(() => {});
 }
 
 async function onScheduleButton(interaction) {
@@ -711,7 +566,6 @@ async function onLookupButton(interaction) {
     storage.setRole(uid, 'teacher');
     if (!storage.get(uid).subscribed) storage.setSubscribed(uid, true);
     log('INFO', `${uid} закрепил режим преподавателя: ${st.params.surname}`);
-    syncGroupRole(uid).catch(() => {});
     await interaction.update(menuView(uid));
     return;
   }
@@ -744,7 +598,6 @@ async function onRoleButton(interaction) {
     }
     storage.setRole(uid, rest);
     await interaction.update(menu.buildRoleView(effState(uid)));
-    syncGroupRole(uid).catch(() => {});
   }
 }
 
@@ -873,16 +726,6 @@ async function onAdminButton(interaction) {
   if (rest === 'admins') return void (await interaction.update(menu.buildAdminsView(storage.getAdmins(), uid)));
   if (rest === 'announce') return void (await interaction.showModal(menu.announceModal()));
   if (rest === 'addadmin') return void (await interaction.showModal(menu.addAdminModal()));
-  if (rest === 'chanaccess') {
-    const guild = provisionGuild();
-    if (!guild) {
-      return void (await interaction.update(
-        menu.buildChannelAccessPick([], 'Не задан PROVISION_GUILD_ID или бот не на сервере.'),
-      ));
-    }
-    await guild.channels.fetch().catch(() => {});
-    return void (await interaction.update(menu.buildChannelAccessPick(server.managedChannels(guild))));
-  }
   if (rest.startsWith('del:')) {
     const id = rest.slice('del:'.length);
     if (!storage.removeAdmin(id)) {
@@ -891,50 +734,6 @@ async function onAdminButton(interaction) {
     }
     log('INFO', `${uid} удалил админа ${id}`);
     await interaction.update(menu.buildAdminsView(storage.getAdmins(), uid));
-  }
-}
-
-function provisionGuild() {
-  return cfg.provisionGuildId ? client.guilds.cache.get(cfg.provisionGuildId) || null : null;
-}
-
-async function onChanAccessButton(interaction) {
-  if (!storage.isAdmin(interaction.user.id)) return void (await interaction.reply({ content: 'Нет доступа.' }));
-  const rest = interaction.customId.slice('chac:'.length);
-  if (rest === 'back') {
-    const guild = provisionGuild();
-    await guild?.channels.fetch().catch(() => {});
-    await interaction.update(menu.buildChannelAccessPick(guild ? server.managedChannels(guild) : []));
-  }
-}
-
-async function onChanAccessPick(interaction) {
-  if (!storage.isAdmin(interaction.user.id)) return void (await interaction.reply({ content: 'Нет доступа.' }));
-  const guild = provisionGuild();
-  const ch = guild && guild.channels.cache.get(interaction.values[0]);
-  if (!ch) return void (await interaction.update(menu.buildChannelAccessPick([], 'Канал не найден, обнови список.')));
-  await interaction.update(menu.buildChannelAccessRoles(ch.id, ch.name, server.currentPosters(ch)));
-}
-
-async function onChanAccessRoles(interaction) {
-  if (!storage.isAdmin(interaction.user.id)) return void (await interaction.reply({ content: 'Нет доступа.' }));
-  const channelId = interaction.customId.slice('chac:roles:'.length);
-  const guild = provisionGuild();
-  const ch = guild && guild.channels.cache.get(channelId);
-  if (!ch) return void (await interaction.update(menu.buildChannelAccessPick([], 'Канал не найден.')));
-  const roleIds = [...interaction.roles.keys()];
-  try {
-    await server.setChannelPosters(ch, roleIds);
-    log('INFO', `${interaction.user.id}: доступ к #${ch.name} -> роли [${roleIds.join(', ') || '—'}]`);
-    await interaction.update(
-      menu.buildChannelAccessPick(
-        server.managedChannels(guild),
-        `✅ #${ch.name}: писать могут ${roleIds.length ? roleIds.map((r) => `<@&${r}>`).join(', ') : 'только админы'}.`,
-      ),
-    );
-  } catch (err) {
-    log('WARN', `chan access: ${err.message}`);
-    await interaction.update(menu.buildChannelAccessPick(server.managedChannels(guild), `Ошибка: ${err.message}`));
   }
 }
 
@@ -970,7 +769,6 @@ async function onModal(interaction) {
     if (!group) return void (await interaction.reply({ content: 'Пустое название группы.' }));
     storage.setGroup(uid, group);
     log('INFO', `${uid} ввёл группу "${group}"`);
-    syncGroupRole(uid).catch(() => {});
     return void (await sendMenu(interaction, uid));
   }
 
@@ -980,7 +778,6 @@ async function onModal(interaction) {
     if (surname) storage.setRole(uid, 'teacher');
     else if (storage.get(uid).role === 'teacher') storage.setRole(uid, 'student');
     log('INFO', `${uid} режим преподавателя: "${surname || '—'}"`);
-    syncGroupRole(uid).catch(() => {});
     const view = menu.buildRoleView(effState(uid));
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
     else await interaction.reply(view);
@@ -1261,11 +1058,6 @@ async function broadcastTick() {
   const targetIso = D.iso(target);
   const dow = D.weekdayIso(target);
 
-  // Отправка в каналы #расписание — по общему времени/дням (BROADCAST_TIME / BROADCAST_DAYS).
-  if (hhmm === cfg.defaultTime && cfg.defaultDays.includes(dow)) {
-    channelBroadcast(target).catch((e) => log('ERROR', `каналы: ${e.stack || e}`));
-  }
-
   const due = storage.subscribers().filter((u) => {
     if ((u.time || cfg.defaultTime) !== hhmm) return false;
     const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
@@ -1284,75 +1076,6 @@ async function broadcastTick() {
   }
 }
 
-const channelPosted = new Map(); // channelId -> iso
-
-/** Постит расписание на завтра в каждый канал #расписание (категория = группа). */
-async function channelBroadcast(target) {
-  if (!cfg.provisionGuildId) return;
-  const guild = client.guilds.cache.get(cfg.provisionGuildId);
-  if (!guild) return;
-  const targetIso = D.iso(target);
-  await guild.channels.fetch().catch(() => {});
-
-  const chans = guild.channels.cache.filter(
-    (c) => c.type === ChannelType.GuildText && c.parent && /расписан/i.test(c.name),
-  );
-  if (!chans.size) return;
-
-  let csvText = null;
-  let humanUrl = null;
-  let notPub = false;
-  try {
-    const r = await ss.fetchDayCsv(target, 0);
-    csvText = r.csvText;
-    humanUrl = r.humanUrl;
-  } catch (err) {
-    if (err instanceof ss.NotPublishedError) notPub = true;
-    else return void log('WARN', `каналы: источник недоступен: ${err.message}`);
-  }
-
-  const weekend = D.weekdayIso(target) >= 6;
-  const cache = new Map();
-  let posted = 0;
-  for (const ch of chans.values()) {
-    if (channelPosted.get(ch.id) === targetIso) continue;
-    const group = ch.parent.name;
-    let payload;
-    if (notPub) {
-      payload = { content: `Расписание на ${D.fmtDM(target)} ещё не опубликовано.` };
-    } else {
-      const gk = ss.normGroup(group);
-      if (!cache.has(gk)) {
-        try {
-          cache.set(gk, ss.buildScheduleData(csvText, group, target, { showGaps: true }));
-        } catch {
-          cache.set(gk, null);
-        }
-      }
-      const data = cache.get(gk);
-      if (!data) continue;
-      if (data.note === 'not-found') {
-        channelPosted.set(ch.id, targetIso); // категория не совпала с группой — не спамим
-        continue;
-      }
-      if (data.note === 'no-lessons') {
-        payload = { content: weekend ? '🎉 Завтра выходной — пар нет.' : '📭 Завтра пар нет.' };
-      } else {
-        payload = menu.scheduleEmbed(data, humanUrl);
-      }
-    }
-    try {
-      await ch.send(payload);
-      channelPosted.set(ch.id, targetIso);
-      posted += 1;
-    } catch (err) {
-      log('WARN', `канал ${ch.id} (${group}): ${err.message}`);
-    }
-    await new Promise((r) => setTimeout(r, 800));
-  }
-  for (const [k, v] of channelPosted) if (v !== targetIso) channelPosted.delete(k);
-  if (posted) log('INFO', `каналы: расписание отправлено в ${posted}`);
-}
 
 async function runBroadcast(due, target, targetIso) {
   log('INFO', `рассылка: ${due.length} получателей, дата ${ss.fmtDMY(target)}`);
