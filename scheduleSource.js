@@ -227,10 +227,11 @@ const TEACHER_RE =
 
 /** «2.МДК 02.01 Пашкевич ЕЛ 22» -> «МДК 02.01, Пашкевич Е.Л., ауд. 22». */
 function formatLesson(cell) {
-  const original = String(cell || '').trim();
+  // Схлопываем любые пробелы/переводы строк — в ячейках Google Sheets бывают \n.
+  const original = String(cell || '').replace(/\s+/g, ' ').trim();
   let raw = original
-    .replace(/^\s*\d+\.\s*/, '') // ведущий номер пары «2.»
-    .replace(/^\s*\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}\s*/, '') // ведущее время в самой ячейке
+    .replace(/^\d+\.\s*/, '') // ведущий номер пары «2.»
+    .replace(/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}\s*/, '') // ведущее время в самой ячейке
     .trim();
   if (!raw) return original;
 
