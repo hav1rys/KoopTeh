@@ -4,6 +4,7 @@
 // Без кэширования расписания: каждый вызов заново тянет свежие данные.
 // (Кэшируется только список групп — он меняется редко.)
 
+const crypto = require('crypto');
 const cfg = require('./config');
 const D = require('./dates');
 
@@ -128,8 +129,18 @@ function findSheetUrl(links, t) {
   return links.get(fmtDMY(t)) || links.get(fmtDM(t)) || links.get(t.d) || null;
 }
 
-async function resolveSheetUrl(calendarUrl, target) {
+// Календарь-страница меняется редко — короткий кэш HTML (снимает нагрузку при
+// обзоре недели и массовой рассылке, где страница нужна много раз подряд).
+let _calHtml = { at: 0, html: '' };
+async function calendarHtml(calendarUrl, maxAgeMs = 30 * 1000) {
+  if (_calHtml.html && Date.now() - _calHtml.at < maxAgeMs) return _calHtml.html;
   const html = await httpGetText(calendarUrl);
+  _calHtml = { at: Date.now(), html };
+  return html;
+}
+
+async function resolveSheetUrl(calendarUrl, target) {
+  const html = await calendarHtml(calendarUrl);
   const url = findSheetUrl(extractSheetLinks(html), target);
   if (!url) throw new NotPublishedError(`нет ссылки на расписание для ${fmtDMY(target)}`);
   return url;
@@ -137,7 +148,7 @@ async function resolveSheetUrl(calendarUrl, target) {
 
 /** Ссылка на CSV самого позднего опубликованного дня (последняя ссылка на странице). */
 async function resolveLatestSheetUrl(calendarUrl) {
-  const html = await httpGetText(calendarUrl);
+  const html = await calendarHtml(calendarUrl);
   const hrefs = [...html.matchAll(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/gi)]
     .map((x) => decodeEntities(x[1]))
     .filter((h) => /docs\.google\.com\/spreadsheets/i.test(h));
@@ -277,6 +288,58 @@ function timeFromCell(cell) {
   return [`${pad(Number(m[1]))}:${m[2]}`, `${pad(Number(m[3]))}:${m[4]}`];
 }
 
+/** Номер пары из ведущего «N.» (в столбце B «2.10.00 - 11.20» или в ячейке «2.МДК…»). */
+function pairNoFromCell(cell) {
+  const m = /^\s*(\d{1,2})\s*\./.exec(String(cell || ''));
+  return m ? Number(m[1]) : null;
+}
+
+/** Нормализация фамилии для сравнения. */
+const normName = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я-]/g, '');
+
+// Расписание звонков (время в таблице указывается не всегда — берём отсюда по номеру пары).
+const BELL_WEEKDAY = {
+  1: ['08:30', '09:50'], 2: ['10:00', '11:20'], 3: ['11:50', '13:10'], 4: ['13:30', '14:50'],
+  5: ['15:10', '16:30'], 6: ['16:40', '18:00'], 7: ['18:10', '19:30'],
+};
+const BELL_WEEKEND = {
+  1: ['08:30', '09:40'], 2: ['09:50', '11:00'], 3: ['11:10', '12:20'], 4: ['12:30', '13:40'],
+  5: ['13:50', '15:00'], 6: ['15:10', '16:20'], 7: ['16:30', '17:40'],
+};
+function bellTime(pair, weekend) {
+  const t = (weekend ? BELL_WEEKEND : BELL_WEEKDAY)[pair];
+  return t ? [t[0], t[1]] : [null, null];
+}
+
+// Иконки предметов (только для отображения в эмбеде, в хэш/текст не входят).
+const SUBJECT_ICONS = [
+  [/(?:^|\W)(?:физ(?:ическ|культур)|физ-?ра)\b/i, '🏃'],
+  [/информатик|программир|мдк|операционн|баз[аы]?\s*данн|веб|python|java|разработ|систем/i, '💻'],
+  [/математик|алгебр|геометр|дискретн|теория\s*вероятн/i, '📐'],
+  [/англ|иностранн|немецк|француз/i, '🗣️'],
+  [/истори|обществозн|общество/i, '📜'],
+  [/литератур|русск(?:ий)?\s*язык|родн(?:ой)?\s*язык/i, '📖'],
+  [/физик/i, '⚛️'],
+  [/хими/i, '⚗️'],
+  [/биолог|естествозн/i, '🌿'],
+  [/географ/i, '🗺️'],
+  [/эконом|бухгалт|финанс|менеджмент|налог/i, '💰'],
+  [/прав\b|юрид|юриспруд|гражданск/i, '⚖️'],
+  [/безопасн\s*жизн|обж|бжд/i, '🛟'],
+  [/черчен|инженерн\S*\s*график/i, '📏'],
+  [/астроном/i, '🔭'],
+  [/классн\S*\s*час|кураторск/i, '🗓️'],
+  [/линейк|праздник|торжеств|посвящен/i, '🎉'],
+  [/экзамен|зач[её]т|консультац|дифференцир/i, '📝'],
+  [/электротехн|электро/i, '⚡'],
+  [/psych|психолог/i, '🧠'],
+];
+function subjectIcon(subject) {
+  const s = String(subject || '');
+  for (const [re, emo] of SUBJECT_ICONS) if (re.test(s)) return emo;
+  return '';
+}
+
 const ROOM_RE =
   /\s+(\d{1,4}[а-яёa-z]?(?:\/\d{1,4})?|спортзал|с\/?зал|актовый\s*зал|библиотека|стадион|дистанционно|онлайн)\s*$/i;
 const TEACHER_RE =
@@ -326,7 +389,7 @@ const formatLesson = (cell) => lessonLine(parseLesson(cell));
  * @returns {null | Array<{ kind, start, end, subject, teacher, room, line }>}
  *          null — группа не найдена в таблице дня.
  */
-function buildEntries(blocks, group) {
+function buildEntries(blocks, group, weekend = false) {
   const g = normGroup(group);
   let chosen = null;
   let col = -1;
@@ -342,15 +405,19 @@ function buildEntries(blocks, group) {
 
   const firstCol = firstGroupCol(chosen.header);
   const entries = [];
+  const fillTime = (s, e, pair) => (s ? [s, e] : bellTime(pair, weekend));
 
   for (const row of chosen.rows) {
     let [start, end] = timeFromCell(row[1] || '');
+    const pair = pairNoFromCell(row[1]);
     const groupCell = (row[col] || '').trim();
 
     if (groupCell) {
       if (!start) [start, end] = timeFromCell(groupCell);
+      const pn = pair ?? pairNoFromCell(groupCell);
+      [start, end] = fillTime(start, end, pn);
       const p = parseLesson(groupCell);
-      entries.push({ kind: 'lesson', start, end, ...p, line: lessonLine(p) });
+      entries.push({ kind: 'lesson', pair: pn, start, end, ...p, line: lessonLine(p) });
       continue;
     }
 
@@ -361,13 +428,15 @@ function buildEntries(blocks, group) {
     if (filled.length === 1 && filled[0][0] === firstCol) {
       let [s, e] = [start, end];
       if (!s) [s, e] = timeFromCell(filled[0][1]);
+      const pn = pair ?? pairNoFromCell(filled[0][1]);
+      [s, e] = fillTime(s, e, pn);
       const p = parseLesson(filled[0][1]);
-      entries.push({ kind: 'event', start: s, end: e, ...p, line: lessonLine(p) });
+      entries.push({ kind: 'event', pair: pn, start: s, end: e, ...p, line: lessonLine(p) });
       continue;
     }
 
     if (start) {
-      entries.push({ kind: 'free', start, end, subject: 'пар нет', teacher: '', room: '', line: 'пар нет' });
+      entries.push({ kind: 'free', pair, start, end, subject: 'пар нет', teacher: '', room: '', line: 'пар нет' });
     }
   }
   return entries;
@@ -381,8 +450,9 @@ function buildScheduleData(csvText, group, target, opts = {}) {
   const blocks = parseBlocks(parseCsv(stripBom(String(csvText))));
   if (!blocks.length) throw new UnavailableError('в таблице не найдено блоков расписания');
 
-  const entries = buildEntries(blocks, group);
-  const meta = { group, target, weekday: weekdayRu(target) };
+  const weekend = D.weekdayIso(target) >= 6;
+  const entries = buildEntries(blocks, group, weekend);
+  const meta = { group, target, weekday: weekdayRu(target), weekend, mode: 'group' };
 
   if (entries === null) return { ...meta, note: 'not-found', rows: [] };
 
@@ -397,25 +467,47 @@ function buildScheduleData(csvText, group, target, opts = {}) {
 
   const rows = slice.map((e) => ({
     kind: e.kind,
-    time: e.start && e.end ? `${e.start}–${e.end}` : e.start || '',
+    pair: e.pair ?? null,
+    start: e.start || '',
+    end: e.end || '',
     subject: e.kind === 'event' ? `🔔 ${e.subject}` : e.subject,
+    icon: e.kind === 'event' || e.kind === 'free' ? '' : subjectIcon(e.subject),
     room: e.room || '',
     teacher: e.teacher || '',
     line: e.line,
   }));
-  return { ...meta, note: null, rows };
+  return { ...meta, mode: 'group', note: null, rows };
 }
 
-/** Тот же контент простым текстом (CLI и обратная совместимость). */
+const timeCol = (r) => {
+  const range = r.start && r.end ? `${r.start}–${r.end}` : r.start || '';
+  return r.pair ? `${r.pair} · ${range}` : range;
+};
+
+/** Тот же контент простым текстом (CLI, текстовый формат, обратная совместимость). */
 function scheduleText(data) {
+  if (data.mode === 'teacher') {
+    const head = `Преподаватель ${data.teacher} — ${fmtDM(data.target)} (${data.weekday}):`;
+    if (data.note === 'no-lessons') return `${head}\nПар нет`;
+    return [head, ...data.rows.map((r) => `${timeCol(r)} — ${r.subject}${r.room ? `, ауд. ${r.room}` : ''} · ${r.groupsText}`)].join('\n');
+  }
+  if (data.mode === 'search') {
+    const head = `Поиск: ${data.title} — ${fmtDM(data.target)} (${data.weekday}):`;
+    if (data.note === 'no-lessons') return `${head}\nНичего не найдено`;
+    return [
+      head,
+      ...data.rows.map(
+        (r) => `${timeCol(r)} — ${r.subject}${r.room ? `, ауд. ${r.room}` : ''} · ${[r.groupsText, r.teacher].filter(Boolean).join(' · ')}`,
+      ),
+    ].join('\n');
+  }
   const head = `Расписание на ${fmtDM(data.target)} (${data.weekday}), группа ${data.group}:`;
   if (data.note === 'not-found') return `${head}\nГруппа не найдена в расписании на эту дату.`;
   if (data.note === 'no-lessons') return `${head}\nПар нет`;
   const lines = [head];
   for (const r of data.rows) {
-    const when = r.time ? `${r.time} — ` : '';
     const prefix = r.kind === 'event' ? '🔔 ' : '';
-    lines.push(when + prefix + r.line);
+    lines.push(`${timeCol(r)} — ${prefix}${r.line}`);
   }
   return lines.join('\n');
 }
@@ -424,23 +516,179 @@ function buildScheduleFromCsv(csvText, group, target, opts = {}) {
   return scheduleText(buildScheduleData(csvText, group, target, opts));
 }
 
+// ---- Режим преподавателя: все пары по фамилии за день -----------------
+
+function buildTeacherData(csvText, surname, target) {
+  const blocks = parseBlocks(parseCsv(stripBom(String(csvText))));
+  if (!blocks.length) throw new UnavailableError('в таблице не найдено блоков расписания');
+  const weekend = D.weekdayIso(target) >= 6;
+  const want = normName(surname);
+  const bag = new Map(); // ключ start|subject|room -> { pair,start,end,subject,room,groups:Set }
+
+  for (const b of blocks) {
+    for (const row of b.rows) {
+      const [start, end] = timeFromCell(row[1] || '');
+      const pair = pairNoFromCell(row[1]);
+      for (let i = 2; i < row.length; i++) {
+        const cell = (row[i] || '').trim();
+        if (!cell) continue;
+        const p = parseLesson(cell);
+        if (!p.teacher || normName(p.teacher.split(' ')[0]) !== want) continue;
+        const pn = pair ?? pairNoFromCell(cell);
+        let [s, e] = start ? [start, end] : timeFromCell(cell);
+        if (!s) [s, e] = bellTime(pn, weekend);
+        const hdrGroups = String(b.header[i] || '').split(',').map((x) => x.trim()).filter(Boolean);
+        const key = `${s}|${p.subject}|${p.room}`;
+        const rec = bag.get(key) || { pair: pn, start: s, end: e, subject: p.subject, room: p.room, groups: new Set() };
+        hdrGroups.forEach((x) => rec.groups.add(x));
+        bag.set(key, rec);
+      }
+    }
+  }
+  const rows = [...bag.values()]
+    .sort((a, b) => (a.start || '').localeCompare(b.start || ''))
+    .map((r) => ({
+      kind: 'lesson',
+      pair: r.pair,
+      start: r.start,
+      end: r.end,
+      subject: r.subject,
+      icon: subjectIcon(r.subject),
+      room: r.room,
+      groupsText: [...r.groups].join(', ') || '—',
+    }));
+
+  return {
+    mode: 'teacher',
+    teacher: surname,
+    target,
+    weekday: weekdayRu(target),
+    weekend,
+    note: rows.length ? null : 'no-lessons',
+    rows,
+  };
+}
+
+// ---- Список всех преподавателей (для автодополнения). Кэш на 1 час. ----
+
+let _teachersCache = { at: 0, list: [] };
+
+async function listAllTeachers({ maxAgeMs = 60 * 60 * 1000 } = {}) {
+  if (_teachersCache.list.length && Date.now() - _teachersCache.at < maxAgeMs) return _teachersCache.list;
+  const url = await resolveLatestSheetUrl(cfg.calendarUrl);
+  const csv = await downloadCsv(url);
+  const blocks = parseBlocks(parseCsv(stripBom(String(csv))));
+  const seen = new Map(); // normName(surname) -> «Фамилия И.О.»
+  for (const b of blocks) {
+    for (const row of b.rows) {
+      for (let i = 2; i < row.length; i++) {
+        const cell = (row[i] || '').trim();
+        if (!cell) continue;
+        const t = parseLesson(cell).teacher;
+        if (!t) continue;
+        const k = normName(t.split(' ')[0]);
+        if (k && !seen.has(k)) seen.set(k, t);
+      }
+    }
+  }
+  const list = [...seen.values()].sort((a, b) => a.localeCompare(b, 'ru'));
+  if (list.length) _teachersCache = { at: Date.now(), list };
+  return list;
+}
+
+// ---- Поиск по кабинету и/или преподавателю за день -------------------
+
+function searchSchedule(csvText, { room = '', teacher = '' }, target) {
+  const blocks = parseBlocks(parseCsv(stripBom(String(csvText))));
+  if (!blocks.length) throw new UnavailableError('в таблице не найдено блоков расписания');
+  const wantRoom = String(room || '').replace(/\s+/g, '').toLowerCase();
+  const wantTeacher = normName(teacher);
+  const titleParts = [];
+  if (room) titleParts.push(`каб. ${room}`);
+  if (teacher) titleParts.push(teacher);
+
+  const weekend = D.weekdayIso(target) >= 6;
+  const rows = [];
+  for (const b of blocks) {
+    for (const row of b.rows) {
+      const [start, end] = timeFromCell(row[1] || '');
+      const pair = pairNoFromCell(row[1]);
+      for (let i = 2; i < row.length; i++) {
+        const cell = (row[i] || '').trim();
+        if (!cell) continue;
+        const p = parseLesson(cell);
+        if (!wantRoom && !wantTeacher) continue;
+        const roomOk = !wantRoom || String(p.room).replace(/\s+/g, '').toLowerCase() === wantRoom;
+        const teacherOk = !wantTeacher || (p.teacher && normName(p.teacher.split(' ')[0]) === wantTeacher);
+        if (!(roomOk && teacherOk)) continue;
+        const pn = pair ?? pairNoFromCell(cell);
+        let [s, e] = start ? [start, end] : timeFromCell(cell);
+        if (!s) [s, e] = bellTime(pn, weekend);
+        const hdrGroups = String(b.header[i] || '').split(',').map((x) => x.trim()).filter(Boolean);
+        rows.push({
+          kind: 'lesson',
+          pair: pn,
+          start: s,
+          end: e,
+          subject: p.subject,
+          icon: subjectIcon(p.subject),
+          room: p.room,
+          teacher: p.teacher,
+          groupsText: hdrGroups.join(', ') || '—',
+        });
+      }
+    }
+  }
+  rows.sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+  return {
+    mode: 'search',
+    title: titleParts.join(' · ') || '—',
+    target,
+    weekday: weekdayRu(target),
+    weekend,
+    note: rows.length ? null : 'no-lessons',
+    rows,
+  };
+}
+
+/** Хэш расписания дня для отслеживания изменений (по каноническому тексту). */
+function scheduleHash(data) {
+  return crypto.createHash('sha1').update(scheduleText(data)).digest('hex');
+}
+
 /** Человекочитаемая ссылка на таблицу-источник (для проверки пользователем). */
 function humanSheetUrl(anyUrl) {
   const m = /\/spreadsheets\/d\/(?:e\/)?([a-zA-Z0-9_-]+)/.exec(anyUrl || '');
   return m ? `https://docs.google.com/spreadsheets/d/${m[1]}/edit` : null;
 }
 
+// Короткий кэш CSV дня (для тик-задач напоминаний и проверки изменений).
+const _csvCache = new Map(); // iso -> { at, csvText, humanUrl }
+
+async function fetchDayCsv(target, maxAgeMs = 0) {
+  const key = D.iso(target);
+  const hit = _csvCache.get(key);
+  if (hit && maxAgeMs > 0 && Date.now() - hit.at < maxAgeMs) return hit;
+  const url = await resolveSheetUrl(cfg.calendarUrl, target);
+  const csvText = await downloadCsv(url);
+  const rec = { at: Date.now(), csvText, humanUrl: humanSheetUrl(url) };
+  _csvCache.set(key, rec);
+  if (_csvCache.size > 40) {
+    for (const k of [..._csvCache.keys()].slice(0, 15)) _csvCache.delete(k);
+  }
+  return rec;
+}
+
 /**
- * Полный путь: календарь -> CSV -> текст + ссылка на источник.
+ * Полный путь: календарь -> CSV -> данные + ссылка на источник.
  * Бросает NotPublishedError / UnavailableError.
  */
 async function getSchedule(group, target, opts = {}) {
-  const url = await resolveSheetUrl(cfg.calendarUrl, target);
-  const csv = await downloadCsv(url);
+  const { csvText, humanUrl } = await fetchDayCsv(target, opts.maxAgeMs || 0);
   return {
-    data: buildScheduleData(csv, group, target, opts),
-    sheetUrl: url,
-    humanUrl: humanSheetUrl(url),
+    data: buildScheduleData(csvText, group, target, opts),
+    csvText,
+    humanUrl,
   };
 }
 
@@ -482,22 +730,33 @@ module.exports = {
   fmtDM,
   fmtDMY,
   normGroup,
+  normName,
   humanSheetUrl,
   // высокоуровневое
   getSchedule,
   getScheduleText,
+  fetchDayCsv,
   resolveSheetUrl,
   resolveLatestSheetUrl,
   downloadCsv,
   buildScheduleData,
   buildScheduleFromCsv,
+  buildTeacherData,
+  searchSchedule,
   scheduleText,
+  scheduleHash,
   listAllGroups,
+  listAllTeachers,
+  bellTime,
+  subjectIcon,
+  BELL_WEEKDAY,
+  BELL_WEEKEND,
   // низкоуровневое (для тестов)
   parseCsv,
   parseBlocks,
   buildEntries,
   parseLesson,
+  pairNoFromCell,
   formatLesson,
   extractSheetLinks,
   findSheetUrl,

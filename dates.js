@@ -44,6 +44,9 @@ function shiftParts(t, deltaDays) {
 
 const tomorrowParts = () => shiftParts(todayParts(), 1);
 
+/** Понедельник недели, содержащей t. */
+const mondayOf = (t) => shiftParts(t, 1 - weekdayIso(t));
+
 const iso = (t) => `${t.y}-${pad(t.mo)}-${pad(t.d)}`;
 
 function partsFromIso(s) {
@@ -77,11 +80,18 @@ function parseHHMM(s) {
   return `${pad(hh)}:${pad(mm)}`;
 }
 
+/** "10:00" -> 600 (минуты от полуночи); мусор -> null. */
+function toMinutes(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
+  return m ? +m[1] * 60 + +m[2] : null;
+}
+
 module.exports = {
   pad,
   tzNow,
   todayParts,
   tomorrowParts,
+  mondayOf,
   shiftParts,
   iso,
   partsFromIso,
@@ -91,4 +101,5 @@ module.exports = {
   fmtDM,
   fmtDMY,
   parseHHMM,
+  toMinutes,
 };
