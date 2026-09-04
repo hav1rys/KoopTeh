@@ -86,6 +86,59 @@ function toMinutes(hhmm) {
   return m ? +m[1] * 60 + +m[2] : null;
 }
 
+/**
+ * Unix-время (секунды) для «дата dateParts + время hhmm» в поясе TIMEZONE.
+ * Нужно для Discord-таймстампов <t:SEC:R>, которые обновляются на клиенте сами.
+ */
+function epochAt(dateParts, hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
+  if (!m || !dateParts) return null;
+  const asUTC = Date.UTC(dateParts.y, dateParts.mo - 1, dateParts.d, +m[1], +m[2], 0);
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: cfg.timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+      .formatToParts(new Date(asUTC))
+      .map((x) => [x.type, x.value]),
+  );
+  const seenUTC = Date.UTC(
+    +p.year,
+    +p.month - 1,
+    +p.day,
+    +(p.hour === '24' ? 0 : p.hour),
+    +p.minute,
+    +p.second,
+  );
+  // seenUTC - asUTC = сдвиг пояса; вычитаем его из asUTC, получаем настоящий момент.
+  return Math.floor((asUTC - (seenUTC - asUTC)) / 1000);
+}
+
+/**
+ * Ближайшая дата ежедневной рассылки (unix-секунды) или null.
+ * Рассылка идёт в день X в hhmm, если день недели X+1 входит в days.
+ */
+function nextBroadcast(days, hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || ''));
+  if (!m || !Array.isArray(days) || !days.length) return null;
+  const bMin = +m[1] * 60 + +m[2];
+  const now = tzNow();
+  const nowMin = now.h * 60 + now.mi;
+  for (let i = 0; i <= 14; i++) {
+    const sendDay = shiftParts(todayParts(), i);
+    if (!days.includes(weekdayIso(shiftParts(sendDay, 1)))) continue;
+    if (i === 0 && bMin <= nowMin) continue;
+    return epochAt(sendDay, hhmm);
+  }
+  return null;
+}
+
 module.exports = {
   pad,
   tzNow,
@@ -102,4 +155,6 @@ module.exports = {
   fmtDMY,
   parseHHMM,
   toMinutes,
+  epochAt,
+  nextBroadcast,
 };

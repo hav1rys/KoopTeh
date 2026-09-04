@@ -651,6 +651,38 @@ function searchSchedule(csvText, { room = '', teacher = '' }, target) {
   };
 }
 
+// ---- Свободные кабинеты на конкретную пару ------------------------
+
+const looksLikeRoom = (r) => /^\d{1,4}[а-яёa-z]?(?:\/\d{1,4})?$/i.test(String(r || '').trim());
+const roomNum = (r) => parseInt(String(r), 10) || 0;
+
+function freeRooms(csvText, target, pairNo) {
+  const blocks = parseBlocks(parseCsv(stripBom(String(csvText))));
+  if (!blocks.length) throw new UnavailableError('в таблице не найдено блоков расписания');
+  const known = new Set();
+  const busy = new Set();
+  for (const b of blocks) {
+    for (const row of b.rows) {
+      const rowPair = pairNoFromCell(row[1]);
+      for (let i = 2; i < row.length; i++) {
+        const cell = (row[i] || '').trim();
+        if (!cell) continue;
+        const room = parseLesson(cell).room.trim();
+        if (!looksLikeRoom(room)) continue;
+        known.add(room);
+        const cp = rowPair ?? pairNoFromCell(cell);
+        if (cp === pairNo) busy.add(room);
+      }
+    }
+  }
+  const byNum = (a, b) => roomNum(a) - roomNum(b) || a.localeCompare(b);
+  return {
+    pair: pairNo,
+    busy: [...busy].sort(byNum),
+    free: [...known].filter((r) => !busy.has(r)).sort(byNum),
+  };
+}
+
 /** Хэш расписания дня для отслеживания изменений (по каноническому тексту). */
 function scheduleHash(data) {
   return crypto.createHash('sha1').update(scheduleText(data)).digest('hex');
@@ -743,6 +775,7 @@ module.exports = {
   buildScheduleFromCsv,
   buildTeacherData,
   searchSchedule,
+  freeRooms,
   scheduleText,
   scheduleHash,
   listAllGroups,

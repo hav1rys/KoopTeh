@@ -67,6 +67,13 @@ function effState(uid) {
   };
 }
 
+/** Меню с виджетом «ближайшая рассылка». */
+function menuView(uid) {
+  const s = effState(uid);
+  const nb = s.subj && s.subscribed ? D.nextBroadcast(s.days, s.time) : null;
+  return menu.buildMenu(s, { nextBroadcastEpoch: nb });
+}
+
 const notPublishedText = (t) =>
   `Расписание на ${ss.fmtDM(t)} (${ss.weekdayRu(t)}) ещё не опубликовано на сайте.`;
 
@@ -251,7 +258,7 @@ async function onSlash(interaction) {
   const name = interaction.commandName;
 
   if (name === 'start') {
-    await interaction.reply(menu.buildMenu(effState(uid)));
+    await interaction.reply(menuView(uid));
     return;
   }
 
@@ -338,7 +345,7 @@ async function onMenuButton(interaction) {
       return;
     case 'togglesub':
       storage.setSubscribed(uid, !s.subscribed);
-      await interaction.update(menu.buildMenu(effState(uid)));
+      await interaction.update(menuView(uid));
       return;
     case 'time':
       await interaction.showModal(menu.timeModal(storage.get(uid).time));
@@ -351,11 +358,11 @@ async function onMenuButton(interaction) {
       return;
     case 'togglegaps':
       storage.setShowGaps(uid, !s.showGaps);
-      await interaction.update(menu.buildMenu(effState(uid)));
+      await interaction.update(menuView(uid));
       return;
     case 'format':
       storage.setFormat(uid, s.format === 'text' ? 'embed' : 'text');
-      await interaction.update(menu.buildMenu(effState(uid)));
+      await interaction.update(menuView(uid));
       return;
     case 'search':
       await interaction.showModal(menu.searchModal());
@@ -363,11 +370,14 @@ async function onMenuButton(interaction) {
     case 'teacher':
       await interaction.showModal(menu.teacherModal());
       return;
+    case 'rooms':
+      await interaction.showModal(menu.roomsModal());
+      return;
     case 'ask':
       await interaction.showModal(menu.askModal());
       return;
     case 'refresh':
-      await interaction.update(menu.buildMenu(effState(uid)));
+      await interaction.update(menuView(uid));
       return;
     default:
   }
@@ -377,7 +387,7 @@ async function onGroupButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('grp:'.length);
 
-  if (rest === 'cancel') return void (await interaction.update(menu.buildMenu(effState(uid))));
+  if (rest === 'cancel') return void (await interaction.update(menuView(uid)));
   if (rest === 'manual') return void (await interaction.showModal(menu.groupModal(storage.get(uid).group)));
   if (rest.startsWith('page:')) {
     const page = Number(rest.slice('page:'.length)) || 0;
@@ -398,7 +408,7 @@ async function onGroupSelect(interaction) {
   const uid = interaction.user.id;
   storage.setGroup(uid, interaction.values[0]);
   log('INFO', `${uid} выбрал группу "${interaction.values[0]}"`);
-  await interaction.update(menu.buildMenu(effState(uid)));
+  await interaction.update(menuView(uid));
 }
 
 async function onScheduleButton(interaction) {
@@ -406,7 +416,7 @@ async function onScheduleButton(interaction) {
   const rest = interaction.customId.slice('sch:'.length);
   const s = effState(uid);
 
-  if (rest === 'menu') return void (await interaction.update(menu.buildMenu(s)));
+  if (rest === 'menu') return void (await interaction.update(menuView(uid)));
 
   if (rest.startsWith('report:')) {
     await interaction.showModal(menu.reportModal(rest.slice('report:'.length)));
@@ -434,7 +444,7 @@ async function onScheduleButton(interaction) {
 async function onLookupButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('lk:'.length);
-  if (rest === 'menu') return void (await interaction.update(menu.buildMenu(effState(uid))));
+  if (rest === 'menu') return void (await interaction.update(menuView(uid)));
 
   const st = lookupState.get(uid);
   if (!st) {
@@ -448,7 +458,7 @@ async function onLookupButton(interaction) {
     storage.setRole(uid, 'teacher');
     if (!storage.get(uid).subscribed) storage.setSubscribed(uid, true);
     log('INFO', `${uid} закрепил режим преподавателя: ${st.params.surname}`);
-    await interaction.update(menu.buildMenu(effState(uid)));
+    await interaction.update(menuView(uid));
     return;
   }
 
@@ -465,7 +475,7 @@ async function onLookupButton(interaction) {
 async function onRoleButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('role:'.length);
-  if (rest === 'done') return void (await interaction.update(menu.buildMenu(effState(uid))));
+  if (rest === 'done') return void (await interaction.update(menuView(uid)));
   if (rest === 'setname') {
     await interaction.showModal(menu.setTeacherModal(storage.get(uid).teacherName));
     return;
@@ -486,7 +496,7 @@ async function onRoleButton(interaction) {
 async function onDaysButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('days:'.length);
-  if (rest === 'done') return void (await interaction.update(menu.buildMenu(effState(uid))));
+  if (rest === 'done') return void (await interaction.update(menuView(uid)));
   if (rest.startsWith('toggle:')) {
     const isoDay = Number(rest.slice('toggle:'.length));
     if (!(isoDay >= 1 && isoDay <= 7)) return;
@@ -501,7 +511,7 @@ async function onDaysButton(interaction) {
 async function onReminderButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('rem:'.length);
-  if (rest === 'done') return void (await interaction.update(menu.buildMenu(effState(uid))));
+  if (rest === 'done') return void (await interaction.update(menuView(uid)));
   if (rest.startsWith('set:')) {
     const n = Number(rest.slice('set:'.length));
     if (!menu.REMINDER_OPTS.includes(n)) return;
@@ -514,7 +524,10 @@ async function onAnswerButton(interaction) {
   const qid = interaction.customId.slice('ans:'.length);
   if (!storage.isAdmin(interaction.user.id)) return void (await interaction.reply({ content: 'Эта кнопка не для тебя.' }));
   const q = storage.getQuestion(qid);
-  if (!q) return void (await interaction.reply({ content: 'Вопрос не найден или на него уже ответили.' }));
+  if (!q) {
+    interaction.message?.unpin?.().catch(() => {});
+    return void (await interaction.reply({ content: 'Вопрос не найден или на него уже ответили.' }));
+  }
   await interaction.showModal(menu.answerModal(qid, q.topic));
 }
 
@@ -542,7 +555,7 @@ async function renderWeek(interaction, uid, mondayParts) {
 async function onWeekButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('wk:'.length);
-  if (rest === 'menu') return void (await interaction.update(menu.buildMenu(effState(uid))));
+  if (rest === 'menu') return void (await interaction.update(menuView(uid)));
   const cur = D.partsFromIso(weekState.get(uid) || '') || D.mondayOf(D.todayParts());
   let monday;
   if (rest === 'this') monday = D.mondayOf(D.todayParts());
@@ -576,7 +589,7 @@ async function onAdminButton(interaction) {
 }
 
 async function sendMenu(interaction, uid) {
-  const view = menu.buildMenu(effState(uid));
+  const view = menuView(uid);
   if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
   else await interaction.reply(view);
 }
@@ -672,6 +685,7 @@ async function onModal(interaction) {
       try {
         if (interaction.isFromMessage && interaction.isFromMessage() && interaction.message) {
           interaction.message.edit({ components: [] }).catch(() => {});
+          interaction.message.unpin().catch(() => {});
         }
       } catch {
         /* ignore */
@@ -683,6 +697,26 @@ async function onModal(interaction) {
         log('ERROR', `не доставить ответ на ${qid}: ${err.message}`);
         await interaction.reply({ content: 'Не удалось отправить ответ. Попробуй ещё раз.' });
       }
+    }
+    return;
+  }
+
+  if (id === 'modal:rooms') {
+    const pair = Number(interaction.fields.getTextInputValue('pair').trim());
+    if (!(pair >= 1 && pair <= 7)) {
+      return void (await interaction.reply({ content: 'Номер пары — число от 1 до 7.' }));
+    }
+    const target = parseDateField(interaction.fields.getTextInputValue('date'));
+    if (!target) return void (await interaction.reply({ content: 'Не понял дату. Формат: дд.мм.' }));
+    await interaction.update({ content: '⏳ Считаю кабинеты…', embeds: [], components: [] });
+    try {
+      const { csvText } = await ss.fetchDayCsv(target, 5 * 60 * 1000);
+      const result = ss.freeRooms(csvText, target, pair);
+      await interaction.editReply(menu.buildRoomsView(result, target));
+    } catch (err) {
+      const msg = err instanceof ss.NotPublishedError ? notPublishedText(target) : 'Не удалось получить данные, попробуй позже.';
+      if (!(err instanceof ss.NotPublishedError)) log('WARN', `кабинеты: ${err.message}`);
+      await interaction.editReply({ content: msg, embeds: [], components: [] });
     }
     return;
   }
@@ -750,7 +784,8 @@ async function relayToAdmin(interaction, uid, topic, body) {
   for (const adminId of storage.getAdmins()) {
     try {
       const admin = await client.users.fetch(adminId);
-      await admin.send(payload);
+      const msg = await admin.send(payload);
+      msg.pin().catch((e) => log('DEBUG', `не закрепить вопрос ${qid} у ${adminId}: ${e.message}`));
       delivered += 1;
     } catch (err) {
       log('WARN', `вопрос ${qid} -> админу ${adminId}: ${err.message}`);

@@ -34,14 +34,6 @@ const timeCol = (r) => {
   return r.pair ? `${r.pair} · ${range}` : range;
 };
 
-function fmtDur(mins) {
-  if (mins <= 0) return 'меньше минуты';
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  if (!h) return `${m} мин`;
-  return m ? `${h} ч ${m} мин` : `${h} ч`;
-}
-
 function daysLabel(days) {
   if (!days || !days.length) return '— (не присылать)';
   if (days.length === 7) return 'каждый день';
@@ -51,31 +43,40 @@ function daysLabel(days) {
 
 // ---- Главное меню ----------------------------------------------------
 
-function buildMenu(s) {
+function buildMenu(s, extras = {}) {
   const noSubj = !s.subj;
   const teacherMode = s.role === 'teacher' && s.teacherName;
+  const nb = extras.nextBroadcastEpoch;
+  const fields = [
+    {
+      name: 'Роль',
+      value: teacherMode ? `👨‍🏫 преподаватель — **${s.teacherName}**` : '🎓 студент',
+      inline: true,
+    },
+    { name: 'Группа', value: s.group ? `**${s.group}**` : '_не указана_', inline: true },
+    {
+      name: 'Рассылка',
+      value: noSubj ? '_нужна группа или фамилия_' : s.subscribed ? '✅ включена' : '⛔ выключена',
+      inline: true,
+    },
+    { name: 'Время', value: `🕘 ${s.time}${s.customTime ? '' : ' (по умолч.)'}`, inline: true },
+    { name: 'Дни', value: `📆 ${daysLabel(s.days)}`, inline: true },
+    { name: 'Напоминания', value: s.reminderMinutes ? `⏰ за ${s.reminderMinutes} мин` : '⏰ выкл', inline: true },
+    { name: 'Формат', value: s.format === 'text' ? '📄 текст' : '📊 эмбед', inline: true },
+    { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
+  ];
+  if (!noSubj && s.subscribed) {
+    fields.push({
+      name: 'Ближайшая рассылка',
+      value: nb ? `📬 <t:${nb}:R> (<t:${nb}:t>)` : '—',
+      inline: true,
+    });
+  }
   const embed = new EmbedBuilder()
     .setColor(teacherMode ? C.teacher : C.weekday)
     .setTitle('🎓 Расписание — Кооперативный техникум')
     .setDescription('Расписание пар приходит в личные сообщения. Настрой всё кнопками ниже.')
-    .addFields(
-      {
-        name: 'Роль',
-        value: teacherMode ? `👨‍🏫 преподаватель — **${s.teacherName}**` : '🎓 студент',
-        inline: true,
-      },
-      { name: 'Группа', value: s.group ? `**${s.group}**` : '_не указана_', inline: true },
-      {
-        name: 'Рассылка',
-        value: noSubj ? '_нужна группа или фамилия_' : s.subscribed ? '✅ включена' : '⛔ выключена',
-        inline: true,
-      },
-      { name: 'Время', value: `🕘 ${s.time}${s.customTime ? '' : ' (по умолч.)'}`, inline: true },
-      { name: 'Дни', value: `📆 ${daysLabel(s.days)}`, inline: true },
-      { name: 'Напоминания', value: s.reminderMinutes ? `⏰ за ${s.reminderMinutes} мин` : '⏰ выкл', inline: true },
-      { name: 'Формат', value: s.format === 'text' ? '📄 текст' : '📊 эмбед', inline: true },
-      { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
-    )
+    .addFields(fields)
     .setFooter({ text: 'Петрозаводск • koopteh10.ru' });
 
   const row1 = new ActionRowBuilder().addComponents(
@@ -129,6 +130,7 @@ function buildMenu(s) {
     new ButtonBuilder().setCustomId('menu:bell').setLabel('🔔 Звонки').setStyle(ButtonStyle.Secondary),
   );
   const row4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('menu:rooms').setLabel('🚪 Свободные кабинеты').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:ask').setLabel('❓ Задать вопрос').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:refresh').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
   );
@@ -147,10 +149,14 @@ const FIELD_NAMES = {
 const noLessonsMsg = (data) =>
   (data.mode || 'group') === 'search' ? 'Ничего не найдено' : data.weekend ? 'Выходной, пар нет' : 'Пар нет';
 
-/** { f1, f2, f3 } для полей-таймеров (только сегодня, режим группы) или null. */
+/**
+ * { f1, f2, f3 } для полей-таймеров (только сегодня, режим группы) или null.
+ * Использует Discord-таймстампы <t:SEC:R> — клиент сам обновляет «через N минут».
+ */
 function countdownParts(data) {
   if ((data.mode || 'group') !== 'group') return null;
-  if (D.iso(data.target) !== D.iso(D.todayParts())) return null;
+  const t = data.target;
+  if (D.iso(t) !== D.iso(D.todayParts())) return null;
   const now = D.tzNow();
   const nowMin = now.h * 60 + now.mi;
   const lessons = data.rows
@@ -163,15 +169,49 @@ function countdownParts(data) {
   const next = lessons.find((r) => r.s > nowMin);
   const last = lessons[lessons.length - 1];
 
+  const rel = (hhmm) => {
+    const ep = D.epochAt(t, hhmm);
+    return ep ? `<t:${ep}:R>` : hhmm;
+  };
+  const at = (hhmm) => {
+    const ep = D.epochAt(t, hhmm);
+    return ep ? `<t:${ep}:t>` : hhmm;
+  };
+
   return {
     f1: current
-      ? `идёт пара, до конца ${fmtDur(current.e - nowMin)}`
+      ? `идёт пара, конец ${rel(current.end)}`
       : next
-        ? `через ${fmtDur(next.s - nowMin)} — в ${next.start}`
+        ? `${rel(next.start)} — в ${at(next.start)}`
         : 'на сегодня всё',
-    f2: current ? `${fmtDur(current.e - nowMin)} — до ${current.end}` : 'сейчас пар нет',
-    f3: nowMin < last.e ? `${fmtDur(last.e - nowMin)} — до ${last.end}` : 'пары закончились',
+    f2: current ? `${rel(current.end)} — до ${at(current.end)}` : 'сейчас пар нет',
+    f3: nowMin < last.e ? `${rel(last.end)} — до ${at(last.end)}` : 'пары закончились',
   };
+}
+
+const plural = (n, one, few, many) => {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+};
+
+/** «Завтра 4 пары, первая 10:00, до 16:30» — краткая сводка (режим группы, есть пары). */
+function summaryLine(data) {
+  if ((data.mode || 'group') !== 'group') return null;
+  const lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
+  if (!lessons.length) return null;
+  const n = lessons.length;
+  const first = lessons[0];
+  const last = lessons[lessons.length - 1];
+  const when =
+    D.iso(data.target) === D.iso(D.todayParts())
+      ? 'Сегодня'
+      : D.iso(data.target) === D.iso(D.tomorrowParts())
+        ? 'Завтра'
+        : D.fmtDM(data.target);
+  return `${when}: ${n} ${plural(n, 'пара', 'пары', 'пар')}, первая ${first.start}, до ${last.end}`;
 }
 
 function scheduleEmbed(data, humanUrl) {
@@ -208,7 +248,9 @@ function scheduleEmbed(data, humanUrl) {
     embed.setDescription(`${descLines.length ? `${descLines.join('\n')}\n\n` : ''}**${noLessonsMsg(data)}**`);
     return { content: '', embeds: [embed], components: [] };
   }
-  if (descLines.length) embed.setDescription(descLines.join('\n'));
+  const summary = summaryLine(data);
+  const desc = summary ? [...descLines, '', `📋 ${summary}`] : descLines;
+  if (desc.length) embed.setDescription(desc.join('\n'));
 
   let curIdx = -1;
   let nextIdx = -1;
@@ -257,6 +299,16 @@ function scheduleEmbed(data, humanUrl) {
       { name: 'Текущая пара', value: cd.f2, inline: true },
       { name: 'Учёба', value: cd.f3, inline: true },
     );
+  } else if (mode === 'group' && !isToday) {
+    const first = data.rows.find((r) => r.kind === 'lesson' && r.start);
+    if (first) {
+      const ep = D.epochAt(data.target, first.start);
+      embed.addFields({
+        name: 'До первой пары',
+        value: ep ? `<t:${ep}:R> (в ${first.start})` : `в ${first.start}`,
+        inline: true,
+      });
+    }
   }
 
   return { content: '', embeds: [embed], components: [] };
@@ -280,6 +332,14 @@ function scheduleTextRich(data, humanUrl) {
   if (data.note === 'no-lessons' || !data.rows.length) {
     lines.push('', `**${noLessonsMsg(data)}**`);
     return lines.join('\n');
+  }
+
+  const summary = summaryLine(data);
+  if (summary) lines.push('', `📋 **${summary}**`);
+  if (mode === 'group' && D.iso(data.target) !== D.iso(D.todayParts())) {
+    const first = data.rows.find((r) => r.kind === 'lesson' && r.start);
+    const ep = first && D.epochAt(data.target, first.start);
+    if (ep) lines.push(`**До первой пары:** <t:${ep}:R>`);
   }
 
   for (const r of data.rows) {
@@ -818,6 +878,55 @@ function announceModal() {
     );
 }
 
+// ---- Свободные кабинеты --------------------------------------
+
+function roomsModal() {
+  return new ModalBuilder()
+    .setCustomId('modal:rooms')
+    .setTitle('Свободные кабинеты')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('pair')
+          .setLabel('Номер пары (1–7)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(1)
+          .setPlaceholder('3'),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('date')
+          .setLabel('Дата дд.мм (пусто — сегодня)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(10)
+          .setPlaceholder('05.09'),
+      ),
+    );
+}
+
+function buildRoomsView(result, target) {
+  const embed = new EmbedBuilder()
+    .setColor(C.search)
+    .setTitle(`🚪 Кабинеты — ${D.fmtDM(target)} (${D.weekdayRu(target)}), пара ${result.pair}`)
+    .addFields(
+      { name: `Свободно (${result.free.length})`, value: clip(result.free.join(', ') || '—') },
+      { name: `Занято (${result.busy.length})`, value: clip(result.busy.join(', ') || '—') },
+    )
+    .setFooter({ text: 'Учитываются только кабинеты, встречающиеся в расписании на этот день' });
+  return {
+    content: '',
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('menu:rooms').setLabel('🔁 Другая пара/дата').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('menu:refresh').setLabel('← В меню').setStyle(ButtonStyle.Primary),
+      ),
+    ],
+  };
+}
+
 function addAdminModal() {
   return new ModalBuilder()
     .setCustomId('modal:addadmin')
@@ -858,6 +967,8 @@ module.exports = {
   searchModal,
   teacherModal,
   reportModal,
+  roomsModal,
+  buildRoomsView,
   announceModal,
   addAdminModal,
   adminQuestionMessage,
