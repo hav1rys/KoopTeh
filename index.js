@@ -6,6 +6,8 @@ const {
   Events,
   MessageFlags,
   SlashCommandBuilder,
+  ApplicationIntegrationType,
+  InteractionContextType,
 } = require('discord.js');
 
 const cfg = require('./config');
@@ -116,25 +118,56 @@ const client = new Client({
 client.once(Events.ClientReady, async (c) => {
   log('INFO', `вошёл как ${c.user.tag} (id ${c.user.id})`);
 
-  const command = new SlashCommandBuilder()
-    .setName('start')
-    .setDescription('Меню расписания: группа, рассылка, расписание по требованию')
-    .toJSON();
-
-  try {
-    if (cfg.guildId) {
-      await c.application.commands.set([command], cfg.guildId);
-      log('INFO', `команда /start зарегистрирована на сервере ${cfg.guildId}`);
-    } else {
-      await c.application.commands.set([command]);
-      log('INFO', 'команда /start зарегистрирована глобально (появится в течение ~1 часа)');
-    }
-  } catch (err) {
-    log('ERROR', `не удалось зарегистрировать команду: ${err.message}`);
-  }
+  await registerCommands(c);
 
   startScheduler();
 });
+
+async function registerCommands(c) {
+  const base = () =>
+    new SlashCommandBuilder()
+      .setName('start')
+      .setDescription('Меню расписания: группа, рассылка, расписание по требованию');
+
+  // Быстрый режим для разработки: команда на одном сервере, появляется мгновенно.
+  if (cfg.guildId) {
+    try {
+      await c.application.commands.set([base().toJSON()], cfg.guildId);
+      log('INFO', `команда /start зарегистрирована на сервере ${cfg.guildId} (режим теста)`);
+    } catch (err) {
+      log('ERROR', `не удалось зарегистрировать /start на сервере ${cfg.guildId}: ${err.message}`);
+    }
+    return;
+  }
+
+  // Боевой режим: глобально, доступно в ЛС и как установка в аккаунт пользователя
+  // (User Install) — сервер не нужен. Требует включённого User Install в
+  // Developer Portal → Installation. Если API это отклонит — откатываемся на
+  // обычную глобальную команду (работает в ЛС для тех, кто с ботом на общем сервере).
+  try {
+    const command = base()
+      .setContexts([
+        InteractionContextType.BotDM,
+        InteractionContextType.PrivateChannel,
+        InteractionContextType.Guild,
+      ])
+      .setIntegrationTypes([
+        ApplicationIntegrationType.UserInstall,
+        ApplicationIntegrationType.GuildInstall,
+      ])
+      .toJSON();
+    await c.application.commands.set([command]);
+    log('INFO', 'команда /start зарегистрирована глобально (ЛС + User Install; прогрузка до ~1 часа)');
+  } catch (err) {
+    log('WARN', `регистрация с User Install не удалась (${err.message}); пробую обычную глобальную`);
+    try {
+      await c.application.commands.set([base().toJSON()]);
+      log('INFO', 'команда /start зарегистрирована глобально (обычная; прогрузка до ~1 часа)');
+    } catch (err2) {
+      log('ERROR', `не удалось зарегистрировать /start: ${err2.message}`);
+    }
+  }
+}
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
