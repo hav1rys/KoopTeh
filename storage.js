@@ -1,31 +1,43 @@
 'use strict';
 
-// Простое хранилище "discord_user_id -> { group, subscribed }" в JSON-файле.
-// Запись атомарная (пишем во временный файл и переименовываем).
+// Хранилище в JSON-файле. Формат:
+//   { "users": { "<discord_id>": { group, subscribed, time, days, showGaps, lastSent } },
+//     "questions": { "<qid>": { askerId, askerTag, topic, question, at } } }
+// Поддерживается миграция со старого «плоского» формата { "<id>": {...} }.
+// Запись атомарная (temp-файл + rename).
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const cfg = require('./config');
 
 const FILE = path.resolve(cfg.dataFile);
-let data = {};
+let data = { users: {}, questions: {} };
+
+function backupCorrupt() {
+  try {
+    fs.renameSync(FILE, `${FILE}.corrupt`);
+  } catch {
+    /* ignore */
+  }
+}
 
 function load() {
+  let raw;
   try {
-    const parsed = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-    data = parsed && typeof parsed === 'object' ? parsed : {};
+    raw = JSON.parse(fs.readFileSync(FILE, 'utf8'));
   } catch (err) {
-    if (err.code === 'ENOENT') {
-      data = {};
-      return;
-    }
-    // Битый файл — отложим в сторону, начнём заново, но не потеряем.
-    try {
-      fs.renameSync(FILE, `${FILE}.corrupt`);
-    } catch {
-      /* ignore */
-    }
-    data = {};
+    if (err.code !== 'ENOENT') backupCorrupt();
+    data = { users: {}, questions: {} };
+    return;
+  }
+  if (raw && typeof raw === 'object' && raw.users && typeof raw.users === 'object') {
+    data = { users: raw.users, questions: raw.questions && typeof raw.questions === 'object' ? raw.questions : {} };
+  } else if (raw && typeof raw === 'object') {
+    // старый плоский формат
+    data = { users: raw, questions: {} };
+  } else {
+    data = { users: {}, questions: {} };
   }
 }
 
@@ -36,35 +48,110 @@ function save() {
   fs.renameSync(tmp, FILE);
 }
 
-/** @returns {{ group: string|null, subscribed: boolean }} */
+// ---- пользователи --------------------------------------------------------
+
+function userRec(userId) {
+  return data.users[userId] || (data.users[userId] = {});
+}
+
+/** @returns {{ group, subscribed, time, days, showGaps, lastSent }} */
 function get(userId) {
-  const rec = data[userId] || {};
-  return { group: rec.group || null, subscribed: Boolean(rec.subscribed) };
+  const r = data.users[userId] || {};
+  return {
+    group: r.group || null,
+    subscribed: Boolean(r.subscribed),
+    time: r.time || null, // null -> использовать cfg.defaultTime
+    days: Array.isArray(r.days) ? r.days : null, // null -> cfg.defaultDays
+    showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
+    lastSent: r.lastSent || null,
+  };
 }
 
 function setGroup(userId, group) {
-  const rec = data[userId] || (data[userId] = {});
-  rec.group = String(group).trim();
-  if (rec.subscribed === undefined) rec.subscribed = true; // новый пользователь — сразу подписан
+  const r = userRec(userId);
+  r.group = String(group).trim();
+  if (r.subscribed === undefined) r.subscribed = true;
   save();
 }
 
-/** @returns {boolean} удалось ли (false, если группа не сохранена) */
 function setSubscribed(userId, value) {
-  const rec = data[userId];
-  if (!rec || !rec.group) return false;
-  rec.subscribed = Boolean(value);
+  const r = data.users[userId];
+  if (!r || !r.group) return false;
+  r.subscribed = Boolean(value);
   save();
   return true;
 }
 
-/** @returns {Array<{ userId: string, group: string }>} */
+function setTime(userId, hhmm) {
+  const r = userRec(userId);
+  if (hhmm) r.time = hhmm;
+  else delete r.time;
+  save();
+}
+
+function setDays(userId, days) {
+  const r = userRec(userId);
+  r.days = Array.isArray(days) ? [...new Set(days)].sort((a, b) => a - b) : [];
+  save();
+}
+
+function setShowGaps(userId, value) {
+  userRec(userId).showGaps = Boolean(value);
+  save();
+}
+
+function setLastSent(userId, iso) {
+  userRec(userId).lastSent = iso;
+  save();
+}
+
+/** @returns {Array<{ userId, group, time, days, showGaps, lastSent }>} */
 function subscribers() {
-  return Object.entries(data)
-    .filter(([, rec]) => rec && rec.group && rec.subscribed)
-    .map(([userId, rec]) => ({ userId, group: rec.group }));
+  return Object.entries(data.users)
+    .filter(([, r]) => r && r.group && r.subscribed)
+    .map(([userId, r]) => ({
+      userId,
+      group: r.group,
+      time: r.time || null,
+      days: Array.isArray(r.days) ? r.days : null,
+      showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
+      lastSent: r.lastSent || null,
+    }));
+}
+
+// ---- вопросы администратору -------------------------------------------
+
+function addQuestion(askerId, askerTag, topic, question) {
+  const qid = crypto.randomBytes(5).toString('hex'); // 10 hex-символов
+  data.questions[qid] = { askerId, askerTag, topic, question, at: Date.now() };
+  save();
+  return qid;
+}
+
+function getQuestion(qid) {
+  return data.questions[qid] || null;
+}
+
+function deleteQuestion(qid) {
+  if (data.questions[qid]) {
+    delete data.questions[qid];
+    save();
+  }
 }
 
 load();
 
-module.exports = { get, setGroup, setSubscribed, subscribers, _file: FILE };
+module.exports = {
+  get,
+  setGroup,
+  setSubscribed,
+  setTime,
+  setDays,
+  setShowGaps,
+  setLastSent,
+  subscribers,
+  addQuestion,
+  getQuestion,
+  deleteQuestion,
+  _file: FILE,
+};

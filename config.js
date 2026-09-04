@@ -1,12 +1,14 @@
 'use strict';
 
+// Все переменные окружения задаются в панели BotHost (Startup / Variables).
+// Файла .env нет и не предполагается.
+
 const path = require('path');
 
-require('dotenv').config();
+const pad = (n) => String(n).padStart(2, '0');
 
 // Куда класть хранилище пользователей.
-// Приоритет: DATA_FILE (полный путь) > DATA_DIR/users.json (BotHost монтирует
-// сюда постоянный volume) > ./data/users.json (локально).
+// Приоритет: DATA_FILE > DATA_DIR/users.json (постоянный volume BotHost) > ./data/users.json.
 function resolveDataFile() {
   if (process.env.DATA_FILE) return process.env.DATA_FILE;
   if (process.env.DATA_DIR) return path.join(process.env.DATA_DIR, 'users.json');
@@ -19,7 +21,18 @@ function parseHHMM(raw) {
   const hh = Number(m[1]);
   const mm = Number(m[2]);
   if (hh > 23 || mm > 59) throw new Error(`BROADCAST_TIME вне диапазона: "${raw}"`);
-  return { hh, mm };
+  return `${pad(hh)}:${pad(mm)}`;
+}
+
+// "1,2,3,4,5,6" -> [1,2,3,4,5,6]; мусор -> null (тогда берётся значение по умолчанию)
+function parseDays(raw) {
+  if (!raw) return null;
+  const arr = String(raw)
+    .split(/[,\s]+/)
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 7);
+  const uniq = [...new Set(arr)].sort((a, b) => a - b);
+  return uniq.length ? uniq : null;
 }
 
 function positiveNumber(raw, fallback) {
@@ -29,7 +42,6 @@ function positiveNumber(raw, fallback) {
 
 function validateTimezone(tz) {
   try {
-    // Бросит RangeError, если пояс неизвестен.
     new Intl.DateTimeFormat('en-CA', { timeZone: tz });
     return tz;
   } catch {
@@ -42,9 +54,22 @@ module.exports = {
   token: process.env.DISCORD_BOT_TOKEN || '',
   calendarUrl: process.env.CALENDAR_URL || 'https://koopteh10.ru/student/lessons/',
   timezone: validateTimezone(process.env.TIMEZONE || 'Europe/Moscow'),
-  broadcast: parseHHMM(process.env.BROADCAST_TIME || '19:00'),
+
+  // Значения по умолчанию для персональных настроек пользователя.
+  defaultTime: parseHHMM(process.env.BROADCAST_TIME || '19:00'),
+  defaultDays: parseDays(process.env.BROADCAST_DAYS) || [1, 2, 3, 4, 5, 6], // Пн–Сб
+
+  // Кому уходят вопросы из кнопки «Задать вопрос».
+  adminId: (process.env.ADMIN_ID || '652927337016328212').trim(),
+
+  // gid листа расписания внутри Google-таблицы дня (все дни сделаны из одного
+  // шаблона, поэтому gid одинаковый). Пусто -> фолбэк по этому gid отключён.
+  scheduleGid:
+    process.env.SCHEDULE_GID === undefined ? '1566598279' : String(process.env.SCHEDULE_GID).trim(),
+
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
-  httpTimeout: positiveNumber(process.env.HTTP_TIMEOUT, 20) * 1000,
+  // секунды -> мс, но не больше 60 с на запрос (защита от опечаток вроде "300000")
+  httpTimeout: Math.min(positiveNumber(process.env.HTTP_TIMEOUT, 20), 60) * 1000,
   logLevel: (process.env.LOG_LEVEL || 'INFO').toUpperCase(),
 };

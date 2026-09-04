@@ -4,19 +4,19 @@ const {
   Client,
   GatewayIntentBits,
   Events,
-  MessageFlags,
   SlashCommandBuilder,
   ApplicationIntegrationType,
   InteractionContextType,
 } = require('discord.js');
 
 const cfg = require('./config');
+const D = require('./dates');
 const storage = require('./storage');
 const ss = require('./scheduleSource');
-const { buildMenu, groupModal, dateModal } = require('./menu');
+const menu = require('./menu');
 
 if (!cfg.token) {
-  console.error('DISCORD_BOT_TOKEN не задан. Скопируй .env.example в .env и впиши токен.');
+  console.error('DISCORD_BOT_TOKEN не задан. Добавь переменную в панели BotHost (Startup / Variables).');
   process.exit(1);
 }
 
@@ -36,75 +36,43 @@ function log(level, msg) {
 }
 
 // --------------------------------------------------------------------------
-// Даты в целевом часовом поясе
+// Вспомогательное
 // --------------------------------------------------------------------------
 
-const pad = (n) => String(n).padStart(2, '0');
-
-function tzNow(tz) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date());
-  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+/** Эффективные настройки пользователя (с подстановкой значений по умолчанию). */
+function effState(uid) {
+  const s = storage.get(uid);
   return {
-    y: +p.year,
-    mo: +p.month,
-    d: +p.day,
-    h: +(p.hour === '24' ? 0 : p.hour),
-    mi: +p.minute,
+    group: s.group,
+    subscribed: s.subscribed,
+    time: s.time || cfg.defaultTime,
+    customTime: Boolean(s.time),
+    days: Array.isArray(s.days) ? s.days : cfg.defaultDays,
+    showGaps: s.showGaps,
   };
-}
-
-function tomorrow() {
-  const n = tzNow(cfg.timezone);
-  const dt = new Date(Date.UTC(n.y, n.mo - 1, n.d));
-  dt.setUTCDate(dt.getUTCDate() + 1);
-  return { y: dt.getUTCFullYear(), mo: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
-}
-
-function normDate(y, mo, d) {
-  if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
-  const dt = new Date(Date.UTC(y, mo - 1, d));
-  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
-  return { y, mo, d };
-}
-
-/** "дд.мм" или "дд.мм.гггг" -> {y,mo,d} | null. Для "дд.мм" год подбирается. */
-function parseDateInput(raw) {
-  const s = String(raw).trim();
-  let m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(s);
-  if (m) return normDate(+m[3], +m[2], +m[1]);
-
-  m = /^(\d{1,2})\.(\d{1,2})$/.exec(s);
-  if (m) {
-    const now = tzNow(cfg.timezone);
-    const cand = normDate(now.y, +m[2], +m[1]);
-    if (!cand) return null;
-    const ord = (o) => o.y * 400 + o.mo * 31 + o.d;
-    if (ord(cand) < ord(now) - 40) return normDate(now.y + 1, +m[2], +m[1]);
-    return cand;
-  }
-  return null;
 }
 
 const notPublishedText = (t) =>
   `Расписание на ${ss.fmtDM(t)} (${ss.weekdayRu(t)}) ещё не опубликовано на сайте.`;
 
-/** Достаёт текст расписания и мягко обрабатывает ошибки источника. */
-async function safeSchedule(group, target) {
+async function safeSchedule(group, target, showGaps) {
   try {
-    return await ss.getScheduleText(group, target);
+    return await ss.getScheduleText(group, target, { showGaps });
   } catch (err) {
     if (err instanceof ss.NotPublishedError) return notPublishedText(target);
-    log('WARN', `не удалось получить расписание (${group}, ${ss.fmtDMY(target)}): ${err.message}`);
+    log('WARN', `расписание (${group}, ${ss.fmtDMY(target)}): ${err.message}`);
     return 'Не удалось получить расписание, попробуй позже.';
   }
+}
+
+// uid -> список групп (для листания без повторной загрузки)
+const groupCache = new Map();
+
+async function groupsFor(uid) {
+  if (groupCache.has(uid)) return groupCache.get(uid);
+  const list = await ss.listAllGroups();
+  groupCache.set(uid, list);
+  return list;
 }
 
 // --------------------------------------------------------------------------
@@ -117,33 +85,24 @@ const client = new Client({
 
 client.once(Events.ClientReady, async (c) => {
   log('INFO', `вошёл как ${c.user.tag} (id ${c.user.id})`);
-
   await registerCommands(c);
-
   startScheduler();
 });
 
 async function registerCommands(c) {
   const base = () =>
-    new SlashCommandBuilder()
-      .setName('start')
-      .setDescription('Меню расписания: группа, рассылка, расписание по требованию');
+    new SlashCommandBuilder().setName('start').setDescription('Меню расписания и настроек');
 
-  // Быстрый режим для разработки: команда на одном сервере, появляется мгновенно.
   if (cfg.guildId) {
     try {
       await c.application.commands.set([base().toJSON()], cfg.guildId);
-      log('INFO', `команда /start зарегистрирована на сервере ${cfg.guildId} (режим теста)`);
+      log('INFO', `команда /start зарегистрирована на сервере ${cfg.guildId} (режим отладки)`);
     } catch (err) {
       log('ERROR', `не удалось зарегистрировать /start на сервере ${cfg.guildId}: ${err.message}`);
     }
     return;
   }
 
-  // Боевой режим: глобально, доступно в ЛС и как установка в аккаунт пользователя
-  // (User Install) — сервер не нужен. Требует включённого User Install в
-  // Developer Portal → Installation. Если API это отклонит — откатываемся на
-  // обычную глобальную команду (работает в ЛС для тех, кто с ботом на общем сервере).
   try {
     const command = base()
       .setContexts([
@@ -169,151 +128,344 @@ async function registerCommands(c) {
   }
 }
 
+// --------------------------------------------------------------------------
+// Роутинг взаимодействий
+// --------------------------------------------------------------------------
+
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === 'start') {
-      await interaction.reply({
-        ...buildMenu(storage.get(interaction.user.id)),
-        flags: MessageFlags.Ephemeral,
-      });
+      await interaction.reply(menu.buildMenu(effState(interaction.user.id)));
       return;
     }
-    if (interaction.isButton() && interaction.customId.startsWith('menu:')) {
-      await onButton(interaction);
+    if (interaction.isButton()) {
+      const id = interaction.customId;
+      if (id.startsWith('menu:')) return await onMenuButton(interaction);
+      if (id.startsWith('grp:')) return await onGroupButton(interaction);
+      if (id.startsWith('sch:')) return await onScheduleButton(interaction);
+      if (id.startsWith('days:')) return await onDaysButton(interaction);
+      if (id.startsWith('ans:')) return await onAnswerButton(interaction);
       return;
     }
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('modal:')) {
-      await onModal(interaction);
-      return;
+    if (interaction.isStringSelectMenu() && interaction.customId === 'grp:pick') {
+      return await onGroupSelect(interaction);
     }
+    if (interaction.isModalSubmit()) return await onModal(interaction);
   } catch (err) {
-    log('ERROR', `ошибка обработки взаимодействия: ${err.stack || err}`);
+    log('ERROR', `interaction: ${err.stack || err}`);
     try {
-      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-        await interaction.reply({
-          content: 'Что-то пошло не так, попробуй ещё раз.',
-          flags: MessageFlags.Ephemeral,
-        });
-      } else if (interaction.deferred) {
-        await interaction.editReply('Что-то пошло не так, попробуй ещё раз.');
-      }
+      const payload = { content: 'Что-то пошло не так, попробуй ещё раз.' };
+      if (interaction.deferred || interaction.replied) await interaction.followUp(payload);
+      else await interaction.reply(payload);
     } catch {
       /* ignore */
     }
   }
 });
 
-async function onButton(interaction) {
+async function onMenuButton(interaction) {
   const action = interaction.customId.slice('menu:'.length);
   const uid = interaction.user.id;
-  const state = storage.get(uid);
+  const s = effState(uid);
 
-  if (action === 'setgroup') {
-    await interaction.showModal(groupModal(state.group));
-    return;
-  }
-
-  if (action === 'refresh') {
-    await interaction.update(buildMenu(storage.get(uid)));
-    return;
-  }
-
-  if (action === 'togglesub') {
-    if (!state.group) {
-      await interaction.reply({ content: 'Сначала укажи группу.', flags: MessageFlags.Ephemeral });
+  switch (action) {
+    case 'setgroup': {
+      await interaction.deferUpdate();
+      let view;
+      try {
+        const list = await ss.listAllGroups();
+        groupCache.set(uid, list);
+        view = list.length
+          ? menu.buildGroupPicker(list, 0)
+          : menu.buildGroupPicker([], 0, { error: 'Сайт не отдал список групп. Введи название вручную.' });
+      } catch (err) {
+        log('WARN', `список групп: ${err.message}`);
+        view = menu.buildGroupPicker([], 0, {
+          error: 'Не удалось загрузить список групп с сайта. Введи название вручную.',
+        });
+      }
+      await interaction.editReply(view);
       return;
     }
-    storage.setSubscribed(uid, !state.subscribed);
-    log('INFO', `пользователь ${uid}: рассылка -> ${!state.subscribed ? 'вкл' : 'выкл'}`);
-    await interaction.update(buildMenu(storage.get(uid)));
-    return;
-  }
-
-  if (action === 'date') {
-    if (!state.group) {
-      await interaction.reply({ content: 'Сначала укажи группу.', flags: MessageFlags.Ephemeral });
+    case 'schedule': {
+      await interaction.deferUpdate();
+      const isoStr = D.iso(D.tomorrowParts());
+      const text = await safeSchedule(s.group, D.partsFromIso(isoStr), s.showGaps);
+      await interaction.editReply(menu.buildScheduleView(text, isoStr));
       return;
     }
-    await interaction.showModal(dateModal());
-    return;
-  }
-
-  if (action === 'tomorrow') {
-    if (!state.group) {
-      await interaction.reply({ content: 'Сначала укажи группу.', flags: MessageFlags.Ephemeral });
+    case 'togglesub': {
+      storage.setSubscribed(uid, !s.subscribed);
+      log('INFO', `${uid}: рассылка -> ${!s.subscribed ? 'вкл' : 'выкл'}`);
+      await interaction.update(menu.buildMenu(effState(uid)));
       return;
     }
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    await interaction.editReply(await safeSchedule(state.group, tomorrow()));
+    case 'time':
+      await interaction.showModal(menu.timeModal(storage.get(uid).time));
+      return;
+    case 'days':
+      await interaction.update(menu.buildDaysView(s.days));
+      return;
+    case 'togglegaps':
+      storage.setShowGaps(uid, !s.showGaps);
+      await interaction.update(menu.buildMenu(effState(uid)));
+      return;
+    case 'ask':
+      await interaction.showModal(menu.askModal());
+      return;
+    case 'refresh':
+      await interaction.update(menu.buildMenu(effState(uid)));
+      return;
+    default:
+      return;
   }
+}
+
+async function onGroupButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('grp:'.length);
+
+  if (rest === 'cancel') {
+    await interaction.update(menu.buildMenu(effState(uid)));
+    return;
+  }
+  if (rest === 'manual') {
+    await interaction.showModal(menu.groupModal(storage.get(uid).group));
+    return;
+  }
+  if (rest.startsWith('page:')) {
+    const page = Number(rest.slice('page:'.length)) || 0;
+    await interaction.deferUpdate();
+    let list;
+    try {
+      list = await groupsFor(uid);
+    } catch (err) {
+      log('WARN', `список групп: ${err.message}`);
+      await interaction.editReply(menu.buildGroupPicker([], 0, { error: 'Не удалось загрузить список групп.' }));
+      return;
+    }
+    await interaction.editReply(menu.buildGroupPicker(list, page));
+  }
+}
+
+async function onGroupSelect(interaction) {
+  const uid = interaction.user.id;
+  const group = interaction.values[0];
+  storage.setGroup(uid, group);
+  log('INFO', `${uid} выбрал группу "${group}"`);
+  await interaction.update(menu.buildMenu(effState(uid)));
+}
+
+async function onScheduleButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('sch:'.length);
+
+  if (rest === 'menu') {
+    await interaction.update(menu.buildMenu(effState(uid)));
+    return;
+  }
+  const target = D.partsFromIso(rest);
+  if (!target) return;
+
+  const s = effState(uid);
+  if (!s.group) {
+    await interaction.reply({ content: 'Сначала укажи группу в меню (/start).' });
+    return;
+  }
+  await interaction.deferUpdate();
+  const text = await safeSchedule(s.group, target, s.showGaps);
+  await interaction.editReply(menu.buildScheduleView(text, rest));
+}
+
+async function onDaysButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('days:'.length);
+
+  if (rest === 'done') {
+    await interaction.update(menu.buildMenu(effState(uid)));
+    return;
+  }
+  if (rest.startsWith('toggle:')) {
+    const isoDay = Number(rest.slice('toggle:'.length));
+    if (!(isoDay >= 1 && isoDay <= 7)) return;
+    const cur = new Set(effState(uid).days);
+    if (cur.has(isoDay)) cur.delete(isoDay);
+    else cur.add(isoDay);
+    const next = [...cur].sort((a, b) => a - b);
+    storage.setDays(uid, next);
+    await interaction.update(menu.buildDaysView(next));
+  }
+}
+
+async function onAnswerButton(interaction) {
+  const qid = interaction.customId.slice('ans:'.length);
+  if (interaction.user.id !== cfg.adminId) {
+    await interaction.reply({ content: 'Эта кнопка не для тебя.' });
+    return;
+  }
+  const q = storage.getQuestion(qid);
+  if (!q) {
+    await interaction.reply({ content: 'Вопрос не найден или на него уже ответили.' });
+    return;
+  }
+  await interaction.showModal(menu.answerModal(qid, q.topic));
 }
 
 async function onModal(interaction) {
   const uid = interaction.user.id;
+  const id = interaction.customId;
 
-  if (interaction.customId === 'modal:setgroup') {
+  if (id === 'modal:setgroup') {
     const group = interaction.fields.getTextInputValue('group').trim();
     if (!group) {
-      await interaction.reply({ content: 'Пустое название группы.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: 'Пустое название группы.' });
       return;
     }
     storage.setGroup(uid, group);
-    log('INFO', `пользователь ${uid} сохранил группу "${group}"`);
-    const view = buildMenu(storage.get(uid));
-    if (interaction.isFromMessage()) await interaction.update(view);
-    else await interaction.reply({ ...view, flags: MessageFlags.Ephemeral });
+    log('INFO', `${uid} ввёл группу "${group}"`);
+    await sendMenu(interaction, uid);
     return;
   }
 
-  if (interaction.customId === 'modal:date') {
-    const target = parseDateInput(interaction.fields.getTextInputValue('date'));
-    if (!target) {
-      await interaction.reply({
-        content: 'Не понял дату. Формат: дд.мм или дд.мм.гггг.',
-        flags: MessageFlags.Ephemeral,
-      });
+  if (id === 'modal:time') {
+    const raw = interaction.fields.getTextInputValue('time').trim();
+    if (!raw) {
+      storage.setTime(uid, null);
+      await sendMenu(interaction, uid);
       return;
     }
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    await interaction.editReply(await safeSchedule(storage.get(uid).group, target));
+    const hhmm = D.parseHHMM(raw);
+    if (!hhmm) {
+      await interaction.reply({ content: 'Неверный формат времени. Нужно ЧЧ:ММ, например 18:30.' });
+      return;
+    }
+    storage.setTime(uid, hhmm);
+    log('INFO', `${uid} время рассылки -> ${hhmm}`);
+    await sendMenu(interaction, uid);
+    return;
+  }
+
+  if (id === 'modal:ask') {
+    const topic = interaction.fields.getTextInputValue('topic').trim() || 'Без темы';
+    const question = interaction.fields.getTextInputValue('question').trim();
+    if (!question) {
+      await interaction.reply({ content: 'Пустой вопрос.' });
+      return;
+    }
+    const qid = storage.addQuestion(uid, interaction.user.tag, topic, question);
+    try {
+      const admin = await client.users.fetch(cfg.adminId);
+      await admin.send(menu.adminQuestionMessage(storage.getQuestion(qid), qid));
+      log('INFO', `вопрос ${qid} от ${uid} отправлен администратору`);
+      await interaction.reply({
+        content: '✅ Вопрос отправлен. Ответ придёт тебе сюда, в личные сообщения.',
+      });
+    } catch (err) {
+      storage.deleteQuestion(qid);
+      log('ERROR', `не доставить вопрос администратору: ${err.message}`);
+      await interaction.reply({
+        content: 'Не удалось доставить вопрос администратору. Попробуй позже.',
+      });
+    }
+    return;
+  }
+
+  if (id.startsWith('modal:answer:')) {
+    const qid = id.slice('modal:answer:'.length);
+    const q = storage.getQuestion(qid);
+    if (!q) {
+      await interaction.reply({ content: 'Вопрос не найден или на него уже ответили.' });
+      return;
+    }
+    const answer = interaction.fields.getTextInputValue('answer').trim();
+    if (!answer) {
+      await interaction.reply({ content: 'Пустой ответ.' });
+      return;
+    }
+    try {
+      const asker = await client.users.fetch(q.askerId);
+      await asker.send(menu.answerMessage(q, answer));
+      storage.deleteQuestion(qid);
+      log('INFO', `ответ на вопрос ${qid} доставлен пользователю ${q.askerId}`);
+      await interaction.reply({ content: '✅ Ответ отправлен пользователю.' });
+      tryDisableButton(interaction);
+    } catch (err) {
+      if (err && err.code === 50007) {
+        await interaction.reply({
+          content: 'У пользователя закрыты личные сообщения — ответ не доставлен. Вопрос остаётся открытым.',
+        });
+      } else {
+        log('ERROR', `не доставить ответ на ${qid}: ${err.message}`);
+        await interaction.reply({ content: 'Не удалось отправить ответ. Попробуй ещё раз.' });
+      }
+    }
+    return;
+  }
+}
+
+/** После модалки: обновить меню на месте, если модалка была вызвана из сообщения. */
+async function sendMenu(interaction, uid) {
+  const view = menu.buildMenu(effState(uid));
+  if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+  else await interaction.reply(view);
+}
+
+function tryDisableButton(interaction) {
+  try {
+    if (interaction.isFromMessage && interaction.isFromMessage() && interaction.message) {
+      interaction.message.edit({ components: [] }).catch(() => {});
+    }
+  } catch {
+    /* ignore */
   }
 }
 
 // --------------------------------------------------------------------------
-// Ежедневная рассылка
+// Ежедневная рассылка (у каждого своё время и свои дни)
 // --------------------------------------------------------------------------
 
-let lastRunKey = null;
+let broadcasting = false;
 
 function startScheduler() {
-  log('INFO', `ежедневная рассылка в ${pad(cfg.broadcast.hh)}:${pad(cfg.broadcast.mm)} ${cfg.timezone}`);
+  log(
+    'INFO',
+    `рассылка: у каждого своё время; по умолчанию ${cfg.defaultTime} ${cfg.timezone}, ` +
+      `дни по умолчанию [${cfg.defaultDays.join(',')}]`,
+  );
   setInterval(tick, 60 * 1000);
   tick();
 }
 
 async function tick() {
-  const n = tzNow(cfg.timezone);
-  if (n.h !== cfg.broadcast.hh || n.mi !== cfg.broadcast.mm) return;
-  const key = `${n.y}-${n.mo}-${n.d}`;
-  if (lastRunKey === key) return;
-  lastRunKey = key;
+  if (broadcasting) return;
+  const now = D.tzNow();
+  const hhmm = `${D.pad(now.h)}:${D.pad(now.mi)}`;
+  const target = D.tomorrowParts();
+  const targetIso = D.iso(target);
+  const dow = D.weekdayIso(target);
+
+  const due = storage.subscribers().filter((u) => {
+    if ((u.time || cfg.defaultTime) !== hhmm) return false;
+    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+    if (!days.includes(dow)) return false;
+    if (u.lastSent === targetIso) return false;
+    return true;
+  });
+  if (!due.length) return;
+
+  broadcasting = true;
   try {
-    await runDailyBroadcast();
+    await runBroadcast(due, target, targetIso);
   } catch (err) {
     log('ERROR', `рассылка упала: ${err.stack || err}`);
+  } finally {
+    broadcasting = false;
   }
 }
 
-async function runDailyBroadcast() {
-  const subs = storage.subscribers();
-  if (!subs.length) {
-    log('INFO', 'рассылка: подписчиков нет');
-    return;
-  }
-  const target = tomorrow();
-  log('INFO', `рассылка: подписчиков ${subs.length}, дата ${ss.fmtDMY(target)}`);
+async function runBroadcast(due, target, targetIso) {
+  log('INFO', `рассылка: ${due.length} получателей, дата ${ss.fmtDMY(target)}`);
 
-  // Один свежий запрос на весь прогон: календарь + CSV дня.
   let csvText = null;
   let notPublished = false;
   let sourceFailed = false;
@@ -328,41 +480,43 @@ async function runDailyBroadcast() {
     }
   }
 
-  const perGroup = new Map();
+  const cache = new Map();
   let sent = 0;
   let skipped = 0;
 
-  for (const { userId, group } of subs) {
+  for (const u of due) {
     let body;
-    if (notPublished) {
-      body = notPublishedText(target);
-    } else if (sourceFailed || !csvText) {
-      body = 'Не удалось получить расписание, попробую позже.';
-    } else {
-      const key = group.replace(/\s+/g, '').toLowerCase();
-      if (perGroup.has(key)) {
-        body = perGroup.get(key);
-      } else {
+    if (notPublished) body = notPublishedText(target);
+    else if (sourceFailed || !csvText) body = 'Не удалось получить расписание, попробую позже.';
+    else {
+      const key = `${ss.normGroup(u.group)}|${u.showGaps ? 1 : 0}`;
+      if (cache.has(key)) body = cache.get(key);
+      else {
         try {
-          body = ss.buildScheduleFromCsv(csvText, group, target);
+          body = ss.buildScheduleFromCsv(csvText, u.group, target, { showGaps: u.showGaps });
         } catch (err) {
-          log('WARN', `рассылка: не разобрать расписание для "${group}": ${err.message}`);
+          log('WARN', `рассылка: разбор для "${u.group}": ${err.message}`);
           body = 'Не удалось получить расписание, попробую позже.';
         }
-        perGroup.set(key, body);
+        cache.set(key, body);
       }
     }
 
     try {
-      const user = await client.users.fetch(userId);
+      const user = await client.users.fetch(u.userId);
       await user.send(body);
       sent += 1;
+      storage.setLastSent(u.userId, targetIso);
     } catch (err) {
       skipped += 1;
-      if (err && err.code === 50007) log('INFO', `ЛС закрыты у ${userId} — пропуск`);
-      else log('WARN', `не удалось отправить ЛС ${userId}: ${err.message || err}`);
+      if (err && err.code === 50007) {
+        log('INFO', `ЛС закрыты у ${u.userId} — пропуск`);
+        storage.setLastSent(u.userId, targetIso);
+      } else {
+        log('WARN', `ЛС ${u.userId}: ${err.message || err}`);
+      }
     }
-    await new Promise((r) => setTimeout(r, 1200)); // бережный лимит
+    await new Promise((r) => setTimeout(r, 1200));
   }
 
   log('INFO', `рассылка завершена: отправлено ${sent}, пропущено ${skipped}`);

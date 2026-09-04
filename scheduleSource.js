@@ -1,22 +1,17 @@
 'use strict';
 
 // Скрапинг страницы-календаря koopteh10.ru + парсинг Google-таблицы дня (CSV).
-// Без кэширования: каждый вызов заново тянет свежие данные.
+// Без кэширования расписания: каждый вызов заново тянет свежие данные.
+// (Кэшируется только список групп — он меняется редко.)
 
 const cfg = require('./config');
+const D = require('./dates');
 
 class NotPublishedError extends Error {} // на эту дату ещё нет ссылки в календаре
 class UnavailableError extends Error {}  // сайт/таблица недоступны или не читаются
 
-const WEEKDAYS_RU = [
-  'воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота',
-];
 const UA = 'KoopTehScheduleBot/1.0 (+Discord schedule bot)';
-
-const pad = (n) => String(n).padStart(2, '0');
-const weekdayRu = (t) => WEEKDAYS_RU[new Date(Date.UTC(t.y, t.mo - 1, t.d)).getUTCDay()];
-const fmtDM = (t) => `${pad(t.d)}.${pad(t.mo)}`;
-const fmtDMY = (t) => `${pad(t.d)}.${pad(t.mo)}.${t.y}`;
+const { pad, weekdayRu, fmtDM, fmtDMY } = D;
 
 // ---------------------------------------------------------------------------
 // HTTP
@@ -48,32 +43,52 @@ const httpGetText = async (url) => (await httpGet(url)).body;
 // Календарь -> ссылка на CSV нужного дня
 // ---------------------------------------------------------------------------
 
-function stripTags(s) {
-  return s.replace(/<[^>]+>/g, ' ');
-}
+const stripTags = (s) => s.replace(/<[^>]+>/g, ' ');
 
 function decodeEntities(s) {
   return s
     .replace(/&amp;/g, '&')
+    .replace(/&#0*38;/g, '&')
+    .replace(/&#x0*26;/gi, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
-    .replace(/&#0?39;/g, "'")
-    .replace(/&#x2f;/gi, '/');
+    .replace(/&#0*39;/g, "'")
+    .replace(/&#x0*2f;/gi, '/');
 }
 
-function toCsvUrl(href, gid) {
-  let m = /\/spreadsheets\/d\/e\/([a-zA-Z0-9_-]+)/.exec(href);
-  if (m) return `https://docs.google.com/spreadsheets/d/e/${m[1]}/pub?output=csv&gid=${gid}`;
-  m = /\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/.exec(href);
-  if (m) return `https://docs.google.com/spreadsheets/d/${m[1]}/export?format=csv&gid=${gid}`;
+function sheetId(href) {
+  const e = /\/spreadsheets\/d\/e\/([a-zA-Z0-9_-]+)/.exec(href);
+  if (e) return { id: e[1], published: true };
+  const m = /\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/.exec(href);
+  if (m) return { id: m[1], published: false };
   return null;
 }
 
+/** Строит ссылку экспорта в CSV. gid может быть null — тогда берётся первый лист. */
+function csvExportUrl(id, published, gid) {
+  const g = gid ? `&gid=${gid}` : '';
+  return published
+    ? `https://docs.google.com/spreadsheets/d/e/${id}/pub?output=csv${g}`
+    : `https://docs.google.com/spreadsheets/d/${id}/export?format=csv${g}`;
+}
+
+function gidFromHref(href) {
+  const m = /[?&#]gid=(\d+)/.exec(href);
+  return m ? m[1] : null;
+}
+
+/** Все «одинокие» числа 1..31 в тексте, в порядке появления. */
+function daysInRange(text) {
+  return (text.match(/(?<!\d)[0-3]?\d(?!\d)/g) || [])
+    .map(Number)
+    .filter((v) => v >= 1 && v <= 31);
+}
+
 /**
- * Возвращает Map ключ -> csvUrl.
- * Ключи: "dd.mm.yyyy" и "dd.mm" (если рядом со ссылкой нашлась полная дата),
- * иначе число дня месяца (1..31).
+ * Возвращает Map: ключ -> csvUrl.
+ * Ключи: "dd.mm.yyyy" и "dd.mm" (если в тексте ссылки есть полная дата),
+ * иначе число дня месяца (обычный случай: <a ...>04</a>).
  */
 function extractSheetLinks(html) {
   const out = new Map();
@@ -85,14 +100,12 @@ function extractSheetLinks(html) {
     if (!hrefM) continue;
     const href = decodeEntities(hrefM[1]);
     if (!/docs\.google\.com\/spreadsheets/i.test(href)) continue;
-
-    const gidM = /[?&#]gid=(\d+)/.exec(href);
-    const csvUrl = toCsvUrl(href, gidM ? gidM[1] : '0');
-    if (!csvUrl) continue;
+    const sid = sheetId(href);
+    if (!sid) continue;
+    const csvUrl = csvExportUrl(sid.id, sid.published, gidFromHref(href));
 
     const anchorText = stripTags(chunk).replace(/\s+/g, ' ').trim();
 
-    // 1) Полная дата прямо в тексте ссылки — самый надёжный вариант.
     const full = /\b(\d{2})\.(\d{2})\.(\d{4})\b/.exec(anchorText);
     if (full) {
       out.set(`${full[1]}.${full[2]}.${full[3]}`, csvUrl);
@@ -100,35 +113,19 @@ function extractSheetLinks(html) {
       continue;
     }
 
-    // 2) Число дня месяца в тексте ссылки (обычный случай: <a ...>9</a>).
     let day = daysInRange(anchorText)[0] ?? null;
-
-    // 3) Иначе — ближайшее число перед ссылкой (напр. <span>9</span><a>…</a>).
     if (day == null) {
       const before = stripTags(html.slice(Math.max(0, m.index - 90), m.index)).replace(/\s+/g, ' ');
       const nums = daysInRange(before);
       if (nums.length) day = nums[nums.length - 1];
     }
-
     if (day != null && !out.has(day)) out.set(day, csvUrl);
   }
   return out;
 }
 
-/** Все «одинокие» числа 1..31 в тексте, в порядке появления. */
-function daysInRange(text) {
-  return (text.match(/(?<!\d)[0-3]?\d(?!\d)/g) || [])
-    .map(Number)
-    .filter((v) => v >= 1 && v <= 31);
-}
-
 function findSheetUrl(links, t) {
-  return (
-    links.get(fmtDMY(t)) ||
-    links.get(fmtDM(t)) ||
-    links.get(t.d) ||
-    null
-  );
+  return links.get(fmtDMY(t)) || links.get(fmtDM(t)) || links.get(t.d) || null;
 }
 
 async function resolveSheetUrl(calendarUrl, target) {
@@ -138,13 +135,63 @@ async function resolveSheetUrl(calendarUrl, target) {
   return url;
 }
 
-async function downloadCsv(url) {
+/** Ссылка на CSV самого позднего опубликованного дня (последняя ссылка на странице). */
+async function resolveLatestSheetUrl(calendarUrl) {
+  const html = await httpGetText(calendarUrl);
+  const hrefs = [...html.matchAll(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/gi)]
+    .map((x) => decodeEntities(x[1]))
+    .filter((h) => /docs\.google\.com\/spreadsheets/i.test(h));
+  if (!hrefs.length) throw new NotPublishedError('на странице нет опубликованных таблиц');
+  const href = hrefs[hrefs.length - 1];
+  const sid = sheetId(href);
+  if (!sid) throw new UnavailableError('не удалось разобрать ссылку на таблицу');
+  return csvExportUrl(sid.id, sid.published, gidFromHref(href));
+}
+
+// ---------------------------------------------------------------------------
+// Загрузка CSV с фолбэками по gid
+// ---------------------------------------------------------------------------
+
+async function fetchCsvOnce(url) {
   const { headers, body } = await httpGet(url);
   const ctype = headers.get('content-type') || '';
   if (!/csv/i.test(ctype) && body.trimStart().startsWith('<')) {
-    throw new UnavailableError('таблица недоступна как CSV (проверьте публичный доступ к документу)');
+    throw new UnavailableError('ответ не CSV (нет публичного доступа к документу?)');
   }
   return body;
+}
+
+/**
+ * Скачивает CSV. Ссылки в календаре часто без gid или с неверным gid,
+ * поэтому пробуем по очереди: как есть -> без gid (первый лист) ->
+ * с известным gid листа расписания (cfg.scheduleGid).
+ */
+async function downloadCsv(url) {
+  const candidates = [url];
+  const idM = /\/spreadsheets\/d\/(?:e\/)?([a-zA-Z0-9_-]+)/.exec(url);
+  if (idM) {
+    const bare = url.includes('/d/e/')
+      ? `https://docs.google.com/spreadsheets/d/e/${idM[1]}/pub?output=csv`
+      : `https://docs.google.com/spreadsheets/d/${idM[1]}/export?format=csv`;
+    if (!candidates.includes(bare)) candidates.push(bare);
+    if (cfg.scheduleGid) {
+      const withGid = `${bare}${bare.includes('?') ? '&' : '?'}gid=${cfg.scheduleGid}`;
+      if (!candidates.includes(withGid)) candidates.push(withGid);
+    }
+  }
+
+  let lastErr;
+  for (const c of candidates) {
+    try {
+      return await fetchCsvOnce(c);
+    } catch (err) {
+      lastErr = err;
+      if (!(err instanceof UnavailableError)) throw err;
+    }
+  }
+  throw new UnavailableError(
+    `не удалось скачать таблицу (${candidates.length} попыток): ${lastErr && lastErr.message}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -160,25 +207,35 @@ function parseCsv(text) {
     const c = text[i];
     if (inQuotes) {
       if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else inQuotes = false;
-      } else {
-        field += c;
-      }
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else inQuotes = false;
+      } else field += c;
       continue;
     }
     if (c === '"') inQuotes = true;
-    else if (c === ',') { row.push(field); field = ''; }
-    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
-    else if (c !== '\r') field += c;
+    else if (c === ',') {
+      row.push(field);
+      field = '';
+    } else if (c === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (c !== '\r') field += c;
   }
-  if (field.length || row.length) { row.push(field); rows.push(row); }
+  if (field.length || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
   return rows;
 }
 
+const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
+
 const DATE_CELL_RE = /^\s*\d{2}\.\d{2}\.\d{4}/;
 
-/** Разбивает строки на блоки по строкам-заголовкам (в столбце A — дата). */
 function parseBlocks(rows) {
   const blocks = [];
   let current = null;
@@ -227,11 +284,10 @@ const TEACHER_RE =
 
 /** «2.МДК 02.01 Пашкевич ЕЛ 22» -> «МДК 02.01, Пашкевич Е.Л., ауд. 22». */
 function formatLesson(cell) {
-  // Схлопываем любые пробелы/переводы строк — в ячейках Google Sheets бывают \n.
   const original = String(cell || '').replace(/\s+/g, ' ').trim();
   let raw = original
-    .replace(/^\d+\.\s*/, '') // ведущий номер пары «2.»
-    .replace(/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}\s*/, '') // ведущее время в самой ячейке
+    .replace(/^\d+\.\s*/, '')
+    .replace(/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}\s*/, '')
     .trim();
   if (!raw) return original;
 
@@ -260,9 +316,8 @@ function formatLesson(cell) {
 }
 
 /**
- * Список занятий группы за день.
- * @returns {null | Array<{ kind: 'lesson'|'event'|'free', start: string|null, end: string|null, text: string }>}
- *          null — группа не найдена в таблице этого дня.
+ * @returns {null | Array<{ kind:'lesson'|'event'|'free', start, end, text }>}
+ *          null — группа не найдена в таблице дня.
  */
 function buildEntries(blocks, group) {
   const g = normGroup(group);
@@ -270,7 +325,11 @@ function buildEntries(blocks, group) {
   let col = -1;
   for (const b of blocks) {
     const c = findColumn(b.header, g);
-    if (c >= 0) { chosen = b; col = c; break; }
+    if (c >= 0) {
+      chosen = b;
+      col = c;
+      break;
+    }
   }
   if (!chosen) return null;
 
@@ -287,9 +346,6 @@ function buildEntries(blocks, group) {
       continue;
     }
 
-    // Общекурсовое событие: во всей строке справа от столбца B заполнена
-    // ровно одна ячейка, и это первая групповая колонка блока
-    // (объединённая ячейка в Google Sheets кладёт значение именно туда).
     const filled = [];
     for (let i = 2; i < row.length; i++) {
       if ((row[i] || '').trim()) filled.push([i, row[i].trim()]);
@@ -301,14 +357,12 @@ function buildEntries(blocks, group) {
       continue;
     }
 
-    // Реальный тайм-слот, но у нашей группы в это время ничего нет — «окно».
     if (start) entries.push({ kind: 'free', start, end, text: 'пар нет' });
-    // Полностью пустая строка — пропускаем.
   }
   return entries;
 }
 
-function formatMessage(entries, group, target) {
+function formatMessage(entries, group, target, showGaps = true) {
   const head = `Расписание на ${fmtDM(target)} (${weekdayRu(target)}), группа ${group}:`;
   if (entries === null) return `${head}\nГруппа не найдена в расписании на эту дату.`;
 
@@ -318,8 +372,9 @@ function formatMessage(entries, group, target) {
   });
   if (!realIdx.length) return `${head}\nПар нет`;
 
-  // Отрезаем ведущие/замыкающие «пар нет», внутренние окна оставляем.
-  const slice = entries.slice(realIdx[0], realIdx[realIdx.length - 1] + 1);
+  let slice = entries.slice(realIdx[0], realIdx[realIdx.length - 1] + 1);
+  if (!showGaps) slice = slice.filter((e) => e.kind !== 'free');
+
   const lines = [head];
   for (const e of slice) {
     let when = '';
@@ -330,22 +385,46 @@ function formatMessage(entries, group, target) {
   return lines.join('\n');
 }
 
-function stripBom(s) {
-  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
-}
-
-function buildScheduleFromCsv(csvText, group, target) {
+function buildScheduleFromCsv(csvText, group, target, opts = {}) {
   const rows = parseCsv(stripBom(String(csvText)));
   const blocks = parseBlocks(rows);
   if (!blocks.length) throw new UnavailableError('в таблице не найдено блоков расписания');
-  return formatMessage(buildEntries(blocks, group), group, target);
+  return formatMessage(buildEntries(blocks, group), group, target, opts.showGaps !== false);
 }
 
-/** Полный путь: календарь -> CSV -> текст сообщения. Бросает NotPublishedError / UnavailableError. */
-async function getScheduleText(group, target) {
+/** Полный путь: календарь -> CSV -> текст. Бросает NotPublishedError / UnavailableError. */
+async function getScheduleText(group, target, opts = {}) {
   const url = await resolveSheetUrl(cfg.calendarUrl, target);
   const csv = await downloadCsv(url);
-  return buildScheduleFromCsv(csv, group, target);
+  return buildScheduleFromCsv(csv, group, target, opts);
+}
+
+// ---------------------------------------------------------------------------
+// Список всех групп (для выпадающего меню). Кэш на 1 час.
+// ---------------------------------------------------------------------------
+
+let _groupsCache = { at: 0, list: [] };
+
+async function listAllGroups({ maxAgeMs = 60 * 60 * 1000 } = {}) {
+  if (_groupsCache.list.length && Date.now() - _groupsCache.at < maxAgeMs) {
+    return _groupsCache.list;
+  }
+  const url = await resolveLatestSheetUrl(cfg.calendarUrl);
+  const csv = await downloadCsv(url);
+  const blocks = parseBlocks(parseCsv(stripBom(String(csv))));
+
+  const seen = new Map(); // norm -> оригинальное написание
+  for (const b of blocks) {
+    for (let i = 2; i < b.header.length; i++) {
+      for (const part of String(b.header[i]).split(',')) {
+        const name = part.replace(/\s+/g, ' ').trim();
+        if (name && !seen.has(normGroup(name))) seen.set(normGroup(name), name);
+      }
+    }
+  }
+  const list = [...seen.values()].sort((a, b) => a.localeCompare(b, 'ru'));
+  if (list.length) _groupsCache = { at: Date.now(), list };
+  return list;
 }
 
 module.exports = {
@@ -354,11 +433,14 @@ module.exports = {
   weekdayRu,
   fmtDM,
   fmtDMY,
+  normGroup,
   // высокоуровневое
   getScheduleText,
   resolveSheetUrl,
+  resolveLatestSheetUrl,
   downloadCsv,
   buildScheduleFromCsv,
+  listAllGroups,
   // низкоуровневое (для тестов)
   parseCsv,
   parseBlocks,
@@ -369,7 +451,7 @@ module.exports = {
   findSheetUrl,
 };
 
-// --- Ручная проверка из терминала: node scheduleSource.js <группа> [дд.мм.гггг] ---
+// --- Ручная проверка: node scheduleSource.js <группа> [дд.мм.гггг] ---
 if (require.main === module) {
   (async () => {
     const group = process.argv[2];

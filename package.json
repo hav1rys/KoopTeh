@@ -14,7 +14,6 @@
     "schedule": "node scheduleSource.js"
   },
   "dependencies": {
-    "discord.js": "^14.16.3",
-    "dotenv": "^16.4.5"
+    "discord.js": "^14.16.3"
   }
 }

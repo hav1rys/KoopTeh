@@ -32,6 +32,19 @@ test('обычная группа: пары, внутреннее окно, фо
   );
 });
 
+test('showGaps: false убирает строки «пар нет»', () => {
+  const msg = ss.buildScheduleFromCsv(CSV, '209ис-1', MON, { showGaps: false });
+  assert.equal(
+    msg,
+    [
+      'Расписание на 07.09 (понедельник), группа 209ис-1:',
+      '10:00–11:20 — МДК 02.01, Пашкевич Е.Л., ауд. 22',
+      '11:50–13:10 — Операционные системы, Ермаков И.С., ауд. 20',
+      '15:00–16:20 — Базы данных, Сидорова В.В., ауд. 21',
+    ].join('\n'),
+  );
+});
+
 test('общекурсовое событие (объединённая ячейка) показывается', () => {
   const msg = ss.buildScheduleFromCsv(CSV, '102ПР', MON);
   assert.equal(
@@ -75,7 +88,8 @@ test('извлечение ссылок из HTML-календаря', () => {
   const html =
     '<td><span>6</span> <a href="https://docs.google.com/spreadsheets/d/ABC_123/edit#gid=77">07.09.2026</a></td>' +
     '<td>8</td>' +
-    '<td><span>9</span> <a href="https://docs.google.com/spreadsheets/d/XYZ789/edit?usp=sharing&amp;gid=0">расписание</a></td>';
+    '<td><span>9</span> <a href="https://docs.google.com/spreadsheets/d/XYZ789/edit?usp=sharing&amp;gid=0">расписание</a></td>' +
+    '<td>10 <a href="https://docs.google.com/spreadsheets/d/NOGID123/edit?usp=sharing">10</a></td>';
   const links = ss.extractSheetLinks(html);
   assert.equal(
     links.get('07.09.2026'),
@@ -85,8 +99,7 @@ test('извлечение ссылок из HTML-календаря', () => {
     ss.findSheetUrl(links, { y: 2026, mo: 9, d: 7 }),
     'https://docs.google.com/spreadsheets/d/ABC_123/export?format=csv&gid=77',
   );
-  assert.equal(
-    links.get(9),
-    'https://docs.google.com/spreadsheets/d/XYZ789/export?format=csv&gid=0',
-  );
+  assert.equal(links.get(9), 'https://docs.google.com/spreadsheets/d/XYZ789/export?format=csv&gid=0');
+  // ссылка без gid -> экспорт без gid (первый лист), а не gid=0
+  assert.equal(links.get(10), 'https://docs.google.com/spreadsheets/d/NOGID123/export?format=csv');
 });
