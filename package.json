@@ -15,5 +15,9 @@
   },
   "dependencies": {
     "discord.js": "^14.16.3"
+  },
+  "optionalDependencies": {
+    "@napi-rs/canvas": "^0.1.0",
+    "@fontsource/roboto": "^5.0.0"
   }
 }

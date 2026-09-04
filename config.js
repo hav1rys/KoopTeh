@@ -67,6 +67,10 @@ module.exports = {
   scheduleGid:
     process.env.SCHEDULE_GID === undefined ? '1566598279' : String(process.env.SCHEDULE_GID).trim(),
 
+  // Статус бота. BOT_ACTIVITY пусто -> встроенная ротация (расписание / /start / N подписчиков).
+  activity: (process.env.BOT_ACTIVITY || '').trim() || null,
+  activityType: (process.env.BOT_ACTIVITY_TYPE || 'watching').trim().toLowerCase(),
+
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
   // секунды -> мс, но не больше 60 с на запрос (защита от опечаток вроде "300000")

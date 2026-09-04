@@ -697,6 +697,12 @@ function humanSheetUrl(anyUrl) {
 // Короткий кэш CSV дня (для тик-задач напоминаний и проверки изменений).
 const _csvCache = new Map(); // iso -> { at, csvText, humanUrl }
 
+/** Синхронно вернуть уже закэшированный CSV дня (без сети) или null. */
+function peekCachedDay(target) {
+  const hit = _csvCache.get(D.iso(target));
+  return hit ? hit.csvText : null;
+}
+
 async function fetchDayCsv(target, maxAgeMs = 0) {
   const key = D.iso(target);
   const hit = _csvCache.get(key);
@@ -768,6 +774,7 @@ module.exports = {
   getSchedule,
   getScheduleText,
   fetchDayCsv,
+  peekCachedDay,
   resolveSheetUrl,
   resolveLatestSheetUrl,
   downloadCsv,

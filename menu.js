@@ -15,6 +15,7 @@ const {
 const cfg = require('./config');
 const D = require('./dates');
 const ss = require('./scheduleSource');
+const render = require('./render');
 
 const C = {
   weekday: 0x2b6cb0, // будни
@@ -65,12 +66,20 @@ function buildMenu(s, extras = {}) {
     { name: 'Формат', value: s.format === 'text' ? '📄 текст' : '📊 эмбед', inline: true },
     { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
   ];
+  fields.push({
+    name: 'Утро',
+    value: s.morning ? `☀️ ${s.morningTime}` : '☀️ выкл',
+    inline: true,
+  });
   if (!noSubj && s.subscribed) {
     fields.push({
       name: 'Ближайшая рассылка',
       value: nb ? `📬 <t:${nb}:R> (<t:${nb}:t>)` : '—',
       inline: true,
     });
+  }
+  if (!noSubj && extras.nextPair) {
+    fields.push({ name: 'Следующая пара', value: String(extras.nextPair).slice(0, 1024), inline: false });
   }
   const embed = new EmbedBuilder()
     .setColor(teacherMode ? C.teacher : C.weekday)
@@ -112,6 +121,11 @@ function buildMenu(s, extras = {}) {
     new ButtonBuilder()
       .setCustomId('menu:reminder')
       .setLabel('⏰ Напоминания')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(noSubj),
+    new ButtonBuilder()
+      .setCustomId('menu:morning')
+      .setLabel('☀️ Утро')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(noSubj),
   );
@@ -196,6 +210,39 @@ const plural = (n, one, few, many) => {
   if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
   return many;
 };
+
+const stripEmoji = (s) => String(s).replace(/^🔔\s*/, '');
+
+/** Короткая строка «следующая пара» для меню (режим группы или преподавателя). */
+function nextPairLine(data) {
+  if (!data || data.note || !Array.isArray(data.rows) || !data.rows.length) return null;
+  const lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
+  if (!lessons.length) return null;
+  const T = data.target;
+  const isToday = D.iso(T) === D.iso(D.todayParts());
+  const now = D.tzNow();
+  const nowMin = now.h * 60 + now.mi;
+  const R = (hhmm) => {
+    const ep = D.epochAt(T, hhmm);
+    return ep ? `<t:${ep}:R>` : `в ${hhmm}`;
+  };
+  const desc = (r) =>
+    `${r.pair ? `${r.pair}. ` : ''}${stripEmoji(r.subject)}${r.room ? `, ауд. ${r.room}` : ''}`;
+
+  if (!isToday) {
+    const f = lessons[0];
+    return `${desc(f)} — ${R(f.start)} (в ${f.start})`;
+  }
+  const cur = lessons.find((r) => {
+    const s = D.toMinutes(r.start);
+    const e = D.toMinutes(r.end);
+    return s != null && e != null && s <= nowMin && nowMin < e;
+  });
+  if (cur) return `сейчас ${desc(cur)} — до ${R(cur.end)}`;
+  const nx = lessons.find((r) => (D.toMinutes(r.start) ?? 1e9) > nowMin);
+  if (!nx) return 'на сегодня всё';
+  return `${desc(nx)} — ${R(nx.start)} (в ${nx.start})`;
+}
 
 /** «Завтра 4 пары, первая 10:00, до 16:30» — краткая сводка (режим группы, есть пары). */
 function summaryLine(data) {
@@ -400,8 +447,17 @@ function buildScheduleView(data, isoStr, humanUrl, errorText, format) {
   const nav = scheduleNav(isoStr);
   if (errorText) return { content: errorText, embeds: [], components: [nav] };
 
+  const canImg = render.available() && (data.mode || 'group') === 'group' && !data.note && data.rows.length;
   const actions = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`sch:send:${isoStr}`).setLabel('📨 Прислать сообщением').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`sch:send:${isoStr}`).setLabel('📨 Прислать').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`sch:share:${isoStr}`).setLabel('📋 Текстом').setStyle(ButtonStyle.Secondary),
+  );
+  if (canImg) {
+    actions.addComponents(
+      new ButtonBuilder().setCustomId(`sch:img:${isoStr}`).setLabel('🖼 Картинкой').setStyle(ButtonStyle.Secondary),
+    );
+  }
+  actions.addComponents(
     new ButtonBuilder().setCustomId(`sch:report:${isoStr}`).setLabel('⚠️ Ошибка').setStyle(ButtonStyle.Danger),
   );
   if (humanUrl && /^https?:\/\//.test(humanUrl)) {
@@ -572,6 +628,47 @@ function buildReminderView(current) {
       ),
     ],
   };
+}
+
+// ---- Утреннее сообщение --------------------------------------
+
+function buildMorningView(s) {
+  const embed = new EmbedBuilder()
+    .setColor(C.weekday)
+    .setTitle('☀️ Утреннее сообщение')
+    .setDescription(
+      'Короткая сводка на сегодня утром: сколько пар и во сколько первая (или «выходной»).\n' +
+        `Сейчас: ${s.morning ? `**вкл, ${s.morningTime}**` : '**выкл**'}. Учитывает выбранные дни недели.`,
+    );
+  return {
+    content: '',
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('mrn:toggle')
+          .setLabel(s.morning ? 'Выключить' : 'Включить')
+          .setStyle(s.morning ? ButtonStyle.Danger : ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('mrn:time').setLabel(`🕗 ${s.morningTime}`).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('mrn:done').setLabel('Готово').setStyle(ButtonStyle.Primary),
+      ),
+    ],
+  };
+}
+
+function morningTimeModal(current) {
+  const input = new TextInputBuilder()
+    .setCustomId('time')
+    .setLabel('Время утром, ЧЧ:ММ')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(5)
+    .setPlaceholder('07:30');
+  if (current) input.setValue(current);
+  return new ModalBuilder()
+    .setCustomId('modal:morningtime')
+    .setTitle('Время утреннего сообщения')
+    .addComponents(new ActionRowBuilder().addComponents(input));
 }
 
 // ---- Модальные окна --------------------------------------------
@@ -765,11 +862,37 @@ function buildWeekView(week, format) {
 
 // ---- Расписание звонков --------------------------------------
 
+/** Живая строка «идёт пара / перемена / до первой» с Discord-таймстампом. */
+function bellStatus(t) {
+  const weekend = D.weekdayIso(t) >= 6;
+  const tbl = weekend ? ss.BELL_WEEKEND : ss.BELL_WEEKDAY;
+  const now = D.tzNow();
+  const nowMin = now.h * 60 + now.mi;
+  const pairs = [1, 2, 3, 4, 5, 6, 7].map((p) => ({
+    p,
+    s: D.toMinutes(tbl[p][0]),
+    e: D.toMinutes(tbl[p][1]),
+    start: tbl[p][0],
+    end: tbl[p][1],
+  }));
+  const R = (hhmm) => {
+    const ep = D.epochAt(t, hhmm);
+    return ep ? `<t:${ep}:R>` : hhmm;
+  };
+  const cur = pairs.find((x) => x.s <= nowMin && nowMin < x.e);
+  if (cur) return `🔔 идёт ${cur.p}-я пара — звонок ${R(cur.end)} (${cur.end})`;
+  const next = pairs.find((x) => x.s > nowMin);
+  if (!next) return '🔔 пары закончились';
+  if (nowMin < pairs[0].s) return `🔔 до ${next.p}-й пары — звонок ${R(next.start)} (${next.start})`;
+  return `☕ перемена — звонок на ${next.p}-ю ${R(next.start)} (${next.start})`;
+}
+
 function bellView() {
   const fmt = (tbl) => [1, 2, 3, 4, 5, 6, 7].map((p) => `${p}. ${tbl[p][0]}–${tbl[p][1]}`).join('\n');
   const embed = new EmbedBuilder()
     .setColor(C.weekday)
     .setTitle('🔔 Расписание звонков')
+    .setDescription(bellStatus(D.todayParts()))
     .addFields(
       { name: 'Будни (Пн–Пт)', value: fmt(ss.BELL_WEEKDAY), inline: true },
       { name: 'Выходные (Сб–Вс)', value: fmt(ss.BELL_WEEKEND), inline: true },
@@ -779,6 +902,7 @@ function bellView() {
     embeds: [embed],
     components: [
       new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('menu:bell').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('menu:refresh').setLabel('← В меню').setStyle(ButtonStyle.Secondary),
       ),
     ],
@@ -951,6 +1075,9 @@ module.exports = {
   buildReminderView,
   buildRoleView,
   setTeacherModal,
+  buildMorningView,
+  morningTimeModal,
+  nextPairLine,
   buildWeekView,
   bellView,
   scheduleEmbed,

@@ -4,6 +4,7 @@ const {
   Client,
   GatewayIntentBits,
   Events,
+  ActivityType,
   SlashCommandBuilder,
   ApplicationIntegrationType,
   InteractionContextType,
@@ -13,6 +14,7 @@ const cfg = require('./config');
 const D = require('./dates');
 const storage = require('./storage');
 const ss = require('./scheduleSource');
+const render = require('./render');
 const menu = require('./menu');
 
 if (!cfg.token) {
@@ -64,14 +66,30 @@ function effState(uid) {
     showGaps: s.showGaps,
     format: s.format,
     reminderMinutes: s.reminderMinutes,
+    morning: s.morning,
+    morningTime: s.morningTime,
   };
 }
 
-/** Меню с виджетом «ближайшая рассылка». */
+/** Меню + виджеты «ближайшая рассылка» и «следующая пара» (из кэша, без сети). */
 function menuView(uid) {
   const s = effState(uid);
   const nb = s.subj && s.subscribed ? D.nextBroadcast(s.days, s.time) : null;
-  return menu.buildMenu(s, { nextBroadcastEpoch: nb });
+  let nextPair = null;
+  if (s.subj) {
+    try {
+      const today = D.todayParts();
+      const csv = ss.peekCachedDay(today);
+      if (csv) nextPair = menu.nextPairLine(buildDayData(csv, s.subj, today, {}));
+      if (!nextPair) {
+        const csvT = ss.peekCachedDay(D.tomorrowParts());
+        if (csvT) nextPair = menu.nextPairLine(buildDayData(csvT, s.subj, D.tomorrowParts(), {}));
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return menu.buildMenu(s, { nextBroadcastEpoch: nb, nextPair });
 }
 
 const notPublishedText = (t) =>
@@ -152,7 +170,51 @@ client.once(Events.ClientReady, async (c) => {
   log('INFO', `вошёл как ${c.user.tag} (id ${c.user.id})`);
   await registerCommands(c);
   startSchedulers();
+  startPresence(c);
 });
+
+const ACT_TYPES = {
+  playing: ActivityType.Playing,
+  listening: ActivityType.Listening,
+  watching: ActivityType.Watching,
+  competing: ActivityType.Competing,
+};
+
+const P = ActivityType.Playing;
+const W = ActivityType.Watching;
+const L = ActivityType.Listening;
+const PRESENCE_ROTATION = [
+  { name: 'успеть на пару в 08:30', type: P },
+  { name: 'угадай, будет ли первая пара', type: P },
+  { name: 'где моя пара?', type: P },
+  { name: 'koopteh10.ru', type: W },
+  { name: 'сколько пар завтра', type: W },
+  { name: 'за изменениями в расписании', type: W },
+  { name: 'кто опоздал на первую пару', type: W },
+  { name: 'звонок на пару', type: L },
+  { name: 'вопросы студентов', type: L },
+  { name: 'жалобы на 7-ю пару', type: L },
+  { name: 'ваши баги и предложения', type: L },
+  { name: 'гул перед парой', type: L },
+];
+
+function applyPresence(c) {
+  try {
+    if (cfg.activity) {
+      c.user.setActivity(cfg.activity, { type: ACT_TYPES[cfg.activityType] ?? ActivityType.Watching });
+      return;
+    }
+    const pick = PRESENCE_ROTATION[Math.floor(Math.random() * PRESENCE_ROTATION.length)];
+    c.user.setActivity(pick.name, { type: pick.type });
+  } catch (err) {
+    log('WARN', `presence: ${err.message}`);
+  }
+}
+
+function startPresence(c) {
+  applyPresence(c);
+  setInterval(() => applyPresence(c), 10 * 60 * 1000);
+}
 
 function commandDefs() {
   return [
@@ -173,6 +235,7 @@ function commandDefs() {
       .setDescription('Пары преподавателя за день')
       .addStringOption((o) => o.setName('фамилия').setDescription('Фамилия').setRequired(true).setAutocomplete(true))
       .addStringOption((o) => o.setName('дата').setDescription('дд.мм')),
+    new SlashCommandBuilder().setName('звонки').setDescription('Расписание звонков и текущий статус'),
     new SlashCommandBuilder().setName('admin').setDescription('Панель администратора'),
   ];
 }
@@ -219,6 +282,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('role:')) return await onRoleButton(interaction);
       if (id.startsWith('days:')) return await onDaysButton(interaction);
       if (id.startsWith('rem:')) return await onReminderButton(interaction);
+      if (id.startsWith('mrn:')) return await onMorningButton(interaction);
       if (id.startsWith('ans:')) return await onAnswerButton(interaction);
       if (id.startsWith('adm:')) return await onAdminButton(interaction);
       return;
@@ -265,6 +329,11 @@ async function onSlash(interaction) {
   if (name === 'admin') {
     if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.' }));
     await interaction.reply(menu.buildAdminMenu());
+    return;
+  }
+
+  if (name === 'звонки') {
+    await interaction.reply(menu.bellView());
     return;
   }
 
@@ -356,6 +425,9 @@ async function onMenuButton(interaction) {
     case 'reminder':
       await interaction.update(menu.buildReminderView(s.reminderMinutes));
       return;
+    case 'morning':
+      await interaction.update(menu.buildMorningView(s));
+      return;
     case 'togglegaps':
       storage.setShowGaps(uid, !s.showGaps);
       await interaction.update(menuView(uid));
@@ -426,6 +498,38 @@ async function onScheduleButton(interaction) {
     const t = D.partsFromIso(rest.slice('send:'.length));
     if (!t || !s.subj) return;
     await sendScheduleSnapshot(interaction, s.subj, t, s.showGaps, s.format);
+    return;
+  }
+  if (rest.startsWith('share:')) {
+    const t = D.partsFromIso(rest.slice('share:'.length));
+    if (!t || !s.subj) return;
+    await interaction.deferReply();
+    const { csvText, humanUrl } = await ss.fetchDayCsv(t, 5 * 60 * 1000).catch(() => ({}));
+    if (!csvText) return void (await interaction.editReply({ content: notPublishedText(t) }));
+    try {
+      const data = buildDayData(csvText, s.subj, t, {});
+      const txt = ss.scheduleText(data) + (humanUrl ? `\n\n🔗 ${humanUrl}` : '');
+      await interaction.editReply({ content: txt.slice(0, 1990) });
+    } catch {
+      await interaction.editReply({ content: 'Не удалось собрать текст.' });
+    }
+    return;
+  }
+  if (rest.startsWith('img:')) {
+    const t = D.partsFromIso(rest.slice('img:'.length));
+    if (!t || !s.subj) return;
+    await interaction.deferReply();
+    const { csvText } = await ss.fetchDayCsv(t, 5 * 60 * 1000).catch(() => ({}));
+    if (!csvText) return void (await interaction.editReply({ content: notPublishedText(t) }));
+    try {
+      const data = buildDayData(csvText, s.subj, t, {});
+      const buf = render.renderScheduleImage(data);
+      if (buf) await interaction.editReply({ files: [{ attachment: buf, name: `raspisanie-${rest.slice('img:'.length)}.png` }] });
+      else await interaction.editReply({ content: ss.scheduleText(data).slice(0, 1990) });
+    } catch (err) {
+      log('WARN', `картинка: ${err.message}`);
+      await interaction.editReply({ content: 'Не удалось сделать картинку.' });
+    }
     return;
   }
 
@@ -517,6 +621,17 @@ async function onReminderButton(interaction) {
     if (!menu.REMINDER_OPTS.includes(n)) return;
     storage.setReminder(uid, n);
     await interaction.update(menu.buildReminderView(n));
+  }
+}
+
+async function onMorningButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('mrn:'.length);
+  if (rest === 'done') return void (await interaction.update(menuView(uid)));
+  if (rest === 'time') return void (await interaction.showModal(menu.morningTimeModal(effState(uid).morningTime)));
+  if (rest === 'toggle') {
+    storage.setMorning(uid, !effState(uid).morning);
+    await interaction.update(menu.buildMorningView(effState(uid)));
   }
 }
 
@@ -701,6 +816,16 @@ async function onModal(interaction) {
     return;
   }
 
+  if (id === 'modal:morningtime') {
+    const hhmm = D.parseHHMM(interaction.fields.getTextInputValue('time'));
+    if (!hhmm) return void (await interaction.reply({ content: 'Неверный формат. Нужно ЧЧ:ММ, например 07:30.' }));
+    storage.setMorningTime(uid, hhmm);
+    const view = menu.buildMorningView(effState(uid));
+    if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+    else await interaction.reply(view);
+    return;
+  }
+
   if (id === 'modal:rooms') {
     const pair = Number(interaction.fields.getTextInputValue('pair').trim());
     if (!(pair >= 1 && pair <= 7)) {
@@ -810,9 +935,82 @@ function startSchedulers() {
     `рассылка: у каждого своё время; по умолчанию ${cfg.defaultTime} ${cfg.timezone}, дни [${cfg.defaultDays.join(',')}]`,
   );
   setInterval(broadcastTick, 60 * 1000);
+  setInterval(morningTick, 60 * 1000);
   setInterval(reminderTick, 60 * 1000);
   setInterval(changeTick, 15 * 60 * 1000);
+  setInterval(warmTick, 5 * 60 * 1000);
   broadcastTick();
+  warmTick();
+}
+
+/** Держит кэш CSV на сегодня/завтра тёплым — чтобы «следующая пара» в /start была без задержки. */
+async function warmTick() {
+  const subs = storage.subscribers();
+  if (!subs.length) return;
+  for (const t of [D.todayParts(), D.tomorrowParts()]) {
+    await ss.fetchDayCsv(t, 4 * 60 * 1000).catch(() => {});
+  }
+}
+
+/** Утреннее «Доброе утро»: сводка на сегодня. */
+async function morningTick() {
+  const now = D.tzNow();
+  const hhmm = `${D.pad(now.h)}:${D.pad(now.mi)}`;
+  const today = D.todayParts();
+  const todayIso = D.iso(today);
+  const dow = D.weekdayIso(today);
+
+  const due = storage.subscribers().filter((u) => {
+    if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
+    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+    if (!days.includes(dow)) return false;
+    return u.morningLastSent !== todayIso;
+  });
+  if (!due.length) return;
+
+  let csvText = null;
+  try {
+    csvText = (await ss.fetchDayCsv(today, 4 * 60 * 1000)).csvText;
+  } catch {
+    /* нет данных — всё равно поздороваемся */
+  }
+
+  const cache = new Map();
+  for (const u of due) {
+    const subj = subjOf(u);
+    let body = '☀️ Доброе утро!';
+    if (subj && csvText) {
+      const sk = subjKey(subj);
+      if (!cache.has(sk)) {
+        try {
+          cache.set(sk, buildDayData(csvText, subj, today, {}));
+        } catch {
+          cache.set(sk, null);
+        }
+      }
+      const data = cache.get(sk);
+      if (data && !data.note) {
+        const lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
+        if (lessons.length) {
+          const n = lessons.length;
+          const w = n % 10 === 1 && n % 100 !== 11 ? 'пара' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'пары' : 'пар';
+          const ep = D.epochAt(today, lessons[0].start);
+          body = `☀️ Доброе утро! Сегодня ${n} ${w}, первая в ${lessons[0].start}${ep ? ` (<t:${ep}:R>)` : ''}, до ${lessons[lessons.length - 1].end}.`;
+        } else {
+          body = D.weekdayIso(today) >= 6 ? '☀️ Доброе утро! Сегодня выходной — пар нет 🎉' : '☀️ Доброе утро! Сегодня пар нет.';
+        }
+      }
+    }
+    try {
+      const user = await client.users.fetch(u.userId);
+      await user.send({ content: body });
+      storage.setMorningLastSent(u.userId, todayIso);
+    } catch (err) {
+      if (err && err.code === 50007) storage.setMorningLastSent(u.userId, todayIso);
+      else log('WARN', `утро ${u.userId}: ${err.message || err}`);
+    }
+    await new Promise((r) => setTimeout(r, 800));
+  }
 }
 
 async function broadcastTick() {
@@ -890,7 +1088,13 @@ async function runBroadcast(due, target, targetIso) {
       }
       const data = dataCache.get(key);
       if (!data) payload = { content: 'Не удалось получить расписание, попробую позже.' };
-      else {
+      else if (data.note === 'no-lessons') {
+        payload = {
+          content: weekendTomorrow
+            ? '🎉 Завтра выходной — пар нет, отдыхай!'
+            : '📭 Завтра пар нет.',
+        };
+      } else {
         payload = menu.scheduleMessage(data, humanUrl, u.format);
         if (!digestSaved.has(sk)) {
           try {

@@ -69,6 +69,9 @@ function get(userId) {
     showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
     format: r.format === 'text' ? 'text' : 'embed',
     reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
+    morning: Boolean(r.morning),
+    morningTime: r.morningTime || '07:30',
+    morningLastSent: r.morningLastSent || null,
     lastSent: r.lastSent || null,
   };
 }
@@ -129,6 +132,21 @@ function setReminder(userId, minutes) {
   save();
 }
 
+function setMorning(userId, value) {
+  rec(userId).morning = Boolean(value);
+  save();
+}
+
+function setMorningTime(userId, hhmm) {
+  rec(userId).morningTime = hhmm || '07:30';
+  save();
+}
+
+function setMorningLastSent(userId, iso) {
+  rec(userId).morningLastSent = iso;
+  save();
+}
+
 function setLastSent(userId, iso) {
   rec(userId).lastSent = iso;
   save();
@@ -147,6 +165,9 @@ function subscribers() {
       showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
       format: r.format === 'text' ? 'text' : 'embed',
       reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
+      morning: Boolean(r.morning),
+      morningTime: r.morningTime || '07:30',
+      morningLastSent: r.morningLastSent || null,
       lastSent: r.lastSent || null,
     }));
 }
@@ -252,6 +273,9 @@ module.exports = {
   setShowGaps,
   setFormat,
   setReminder,
+  setMorning,
+  setMorningTime,
+  setMorningLastSent,
   setLastSent,
   subscribers,
   addQuestion,
