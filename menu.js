@@ -198,9 +198,48 @@ function buildDaysView(days) {
   };
 }
 
+// ---- Расписание: эмбед с колонками Время / Предмет | Кабинет / Преподаватель ----
+
+const clip = (s) => (s.length > 1024 ? `${s.slice(0, 1021)}…` : s);
+
+function scheduleEmbed(data, humanUrl) {
+  const embed = new EmbedBuilder()
+    .setColor(COLOR)
+    .setTitle(`Расписание на ${D.fmtDM(data.target)} (${data.weekday})`);
+
+  const desc = [`Группа: ${data.group}`];
+  if (humanUrl && /^https?:\/\//.test(humanUrl)) desc.push(`🔗 Проверить: ${humanUrl}`);
+
+  if (data.note === 'not-found') {
+    embed.setDescription(`${desc.join('\n')}\n\nГруппа не найдена в расписании на эту дату.`);
+    return { content: '', embeds: [embed], components: [] };
+  }
+  if (data.note === 'no-lessons' || !data.rows.length) {
+    embed.setDescription(`${desc.join('\n')}\n\n**Пар нет**`);
+    return { content: '', embeds: [embed], components: [] };
+  }
+
+  embed.setDescription(desc.join('\n'));
+
+  const times = [];
+  const subjects = [];
+  const teachers = [];
+  for (const r of data.rows) {
+    times.push(`• ${r.time || '—'}`);
+    subjects.push(r.room ? `${r.subject} | ${r.room}` : r.subject || '—');
+    teachers.push(r.teacher || '—');
+  }
+  embed.addFields(
+    { name: 'Время', value: clip(times.join('\n')), inline: true },
+    { name: 'Предмет | Кабинет', value: clip(subjects.join('\n')), inline: true },
+    { name: 'Преподаватель', value: clip(teachers.join('\n')), inline: true },
+  );
+  return { content: '', embeds: [embed], components: [] };
+}
+
 // ---- Экран расписания с навигацией по датам --------------------------
 
-function buildScheduleView(text, isoStr, humanUrl) {
+function buildScheduleView(data, isoStr, humanUrl, errorText) {
   const todayIso = D.iso(D.todayParts());
   const tomIso = D.iso(D.tomorrowParts());
 
@@ -222,6 +261,10 @@ function buildScheduleView(text, isoStr, humanUrl) {
     new ButtonBuilder().setCustomId('sch:menu').setLabel('В меню').setStyle(ButtonStyle.Primary),
   );
 
+  if (errorText) {
+    return { content: errorText, embeds: [], components: [nav] };
+  }
+
   const actions = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`sch:send:${isoStr}`)
@@ -234,7 +277,8 @@ function buildScheduleView(text, isoStr, humanUrl) {
     );
   }
 
-  return { content: text.slice(0, 1900), embeds: [], components: [nav, actions] };
+  const base = scheduleEmbed(data, humanUrl);
+  return { content: '', embeds: base.embeds, components: [nav, actions] };
 }
 
 // ---- Время рассылки -------------------------------------------------
@@ -323,6 +367,7 @@ module.exports = {
   buildGroupPicker,
   groupModal,
   buildDaysView,
+  scheduleEmbed,
   buildScheduleView,
   timeModal,
   askModal,

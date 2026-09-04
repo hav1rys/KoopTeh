@@ -55,25 +55,27 @@ function effState(uid) {
 const notPublishedText = (t) =>
   `Расписание на ${ss.fmtDM(t)} (${ss.weekdayRu(t)}) ещё не опубликовано на сайте.`;
 
-const withSource = (text, url) => (url ? `${text}\n\n🔗 Проверить: ${url}` : text);
-
-/** @returns {{ text: string, url: string|null }} */
+/** @returns {{ data: object|null, url: string|null, error: string|null }} */
 async function safeSchedule(group, target, showGaps) {
   try {
     const r = await ss.getSchedule(group, target, { showGaps });
-    return { text: r.text, url: r.humanUrl };
+    return { data: r.data, url: r.humanUrl, error: null };
   } catch (err) {
-    if (err instanceof ss.NotPublishedError) return { text: notPublishedText(target), url: null };
+    if (err instanceof ss.NotPublishedError) return { data: null, url: null, error: notPublishedText(target) };
     log('WARN', `расписание (${group}, ${ss.fmtDMY(target)}): ${err.message}`);
-    return { text: 'Не удалось получить расписание, попробуй позже.', url: null };
+    return { data: null, url: null, error: 'Не удалось получить расписание, попробуй позже.' };
   }
 }
 
-/** Отправляет расписание отдельным сообщением (снимок, без навигации). */
+/** Отправляет расписание отдельным сообщением-эмбедом (снимок, без навигации). */
 async function sendScheduleSnapshot(interaction, group, target, showGaps) {
   await interaction.deferReply();
-  const { text, url } = await safeSchedule(group, target, showGaps);
-  await interaction.editReply({ content: withSource(text, url) });
+  const { data, url, error } = await safeSchedule(group, target, showGaps);
+  if (error) {
+    await interaction.editReply({ content: error, embeds: [] });
+    return;
+  }
+  await interaction.editReply(menu.scheduleEmbed(data, url));
 }
 
 // uid -> список групп (для листания без повторной загрузки)
@@ -201,8 +203,8 @@ async function onMenuButton(interaction) {
     case 'schedule': {
       await interaction.deferUpdate();
       const isoStr = D.iso(D.tomorrowParts());
-      const { text, url } = await safeSchedule(s.group, D.partsFromIso(isoStr), s.showGaps);
-      await interaction.editReply(menu.buildScheduleView(text, isoStr, url));
+      const { data, url, error } = await safeSchedule(s.group, D.partsFromIso(isoStr), s.showGaps);
+      await interaction.editReply(menu.buildScheduleView(data, isoStr, url, error));
       return;
     }
     case 'now':
@@ -307,8 +309,8 @@ async function onScheduleButton(interaction) {
     return;
   }
   await interaction.deferUpdate();
-  const { text, url } = await safeSchedule(s.group, target, s.showGaps);
-  await interaction.editReply(menu.buildScheduleView(text, D.iso(target), url));
+  const { data, url, error } = await safeSchedule(s.group, target, s.showGaps);
+  await interaction.editReply(menu.buildScheduleView(data, D.iso(target), url, error));
 }
 
 async function onDaysButton(interaction) {
@@ -521,25 +523,26 @@ async function runBroadcast(due, target, targetIso) {
   let skipped = 0;
 
   for (const u of due) {
-    let body;
-    if (notPublished) body = notPublishedText(target);
-    else if (sourceFailed || !csvText) body = 'Не удалось получить расписание, попробую позже.';
+    let payload;
+    if (notPublished) payload = { content: notPublishedText(target) };
+    else if (sourceFailed || !csvText) payload = { content: 'Не удалось получить расписание, попробую позже.' };
     else {
       const key = `${ss.normGroup(u.group)}|${u.showGaps ? 1 : 0}`;
       if (!cache.has(key)) {
         try {
-          cache.set(key, ss.buildScheduleFromCsv(csvText, u.group, target, { showGaps: u.showGaps }));
+          const data = ss.buildScheduleData(csvText, u.group, target, { showGaps: u.showGaps });
+          cache.set(key, menu.scheduleEmbed(data, humanUrl));
         } catch (err) {
           log('WARN', `рассылка: разбор для "${u.group}": ${err.message}`);
-          cache.set(key, 'Не удалось получить расписание, попробую позже.');
+          cache.set(key, { content: 'Не удалось получить расписание, попробую позже.' });
         }
       }
-      body = withSource(cache.get(key), humanUrl);
+      payload = cache.get(key);
     }
 
     try {
       const user = await client.users.fetch(u.userId);
-      await user.send(body);
+      await user.send(payload);
       sent += 1;
       storage.setLastSent(u.userId, targetIso);
     } catch (err) {

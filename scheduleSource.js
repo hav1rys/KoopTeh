@@ -282,23 +282,23 @@ const ROOM_RE =
 const TEACHER_RE =
   /\s+([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)\s+([А-ЯЁ]\.?(?:\s?[А-ЯЁ]\.?)?)\s*$/;
 
-/** «2.МДК 02.01 Пашкевич ЕЛ 22» -> «МДК 02.01, Пашкевич Е.Л., ауд. 22». */
-function formatLesson(cell) {
+/** «2.МДК 02.01 Пашкевич ЕЛ 22» -> { subject:'МДК 02.01', teacher:'Пашкевич Е.Л.', room:'22' } */
+function parseLesson(cell) {
   const original = String(cell || '').replace(/\s+/g, ' ').trim();
   let raw = original
     .replace(/^\d+\.\s*/, '')
     .replace(/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}\s*/, '')
     .trim();
-  if (!raw) return original;
+  if (!raw) return { subject: original, teacher: '', room: '' };
 
-  let room = null;
+  let room = '';
   const mr = ROOM_RE.exec(raw);
   if (mr) {
     room = mr[1].replace(/\s+/g, ' ');
     raw = raw.slice(0, mr.index).trim();
   }
 
-  let teacher = null;
+  let teacher = '';
   const mt = TEACHER_RE.exec(raw);
   if (mt) {
     const initials = (mt[2].match(/[А-ЯЁ]/g) || []).join('.');
@@ -306,17 +306,24 @@ function formatLesson(cell) {
     raw = raw.slice(0, mt.index).trim();
   }
 
-  const subject = raw.replace(/[\s,;]+$/, '').trim();
+  const subject = raw.replace(/[\s,;]+$/, '').trim() || original;
+  return { subject, teacher, room };
+}
+
+/** Структуру занятия -> строка «Предмет, Преподаватель, ауд. N». */
+function lessonLine({ subject, teacher, room }) {
   const parts = [subject, teacher].filter(Boolean);
-  let line = parts.length ? parts.join(', ') : original;
+  let line = parts.join(', ') || subject;
   if (room) {
     line += /^\d{1,4}[а-яёa-z]?(?:\/\d{1,4})?$/i.test(room) ? `, ауд. ${room}` : `, ${room}`;
   }
   return line;
 }
 
+const formatLesson = (cell) => lessonLine(parseLesson(cell));
+
 /**
- * @returns {null | Array<{ kind:'lesson'|'event'|'free', start, end, text }>}
+ * @returns {null | Array<{ kind, start, end, subject, teacher, room, line }>}
  *          null — группа не найдена в таблице дня.
  */
 function buildEntries(blocks, group) {
@@ -342,7 +349,8 @@ function buildEntries(blocks, group) {
 
     if (groupCell) {
       if (!start) [start, end] = timeFromCell(groupCell);
-      entries.push({ kind: 'lesson', start, end, text: formatLesson(groupCell) });
+      const p = parseLesson(groupCell);
+      entries.push({ kind: 'lesson', start, end, ...p, line: lessonLine(p) });
       continue;
     }
 
@@ -353,43 +361,67 @@ function buildEntries(blocks, group) {
     if (filled.length === 1 && filled[0][0] === firstCol) {
       let [s, e] = [start, end];
       if (!s) [s, e] = timeFromCell(filled[0][1]);
-      entries.push({ kind: 'event', start: s, end: e, text: formatLesson(filled[0][1]) });
+      const p = parseLesson(filled[0][1]);
+      entries.push({ kind: 'event', start: s, end: e, ...p, line: lessonLine(p) });
       continue;
     }
 
-    if (start) entries.push({ kind: 'free', start, end, text: 'пар нет' });
+    if (start) {
+      entries.push({ kind: 'free', start, end, subject: 'пар нет', teacher: '', room: '', line: 'пар нет' });
+    }
   }
   return entries;
 }
 
-function formatMessage(entries, group, target, showGaps = true) {
-  const head = `Расписание на ${fmtDM(target)} (${weekdayRu(target)}), группа ${group}:`;
-  if (entries === null) return `${head}\nГруппа не найдена в расписании на эту дату.`;
+/**
+ * Структурированное расписание дня для рендера (эмбед или текст).
+ * @returns {{ group, target, weekday, note:null|'not-found'|'no-lessons', rows: Array }}
+ */
+function buildScheduleData(csvText, group, target, opts = {}) {
+  const blocks = parseBlocks(parseCsv(stripBom(String(csvText))));
+  if (!blocks.length) throw new UnavailableError('в таблице не найдено блоков расписания');
+
+  const entries = buildEntries(blocks, group);
+  const meta = { group, target, weekday: weekdayRu(target) };
+
+  if (entries === null) return { ...meta, note: 'not-found', rows: [] };
 
   const realIdx = [];
   entries.forEach((e, i) => {
     if (e.kind === 'lesson' || e.kind === 'event') realIdx.push(i);
   });
-  if (!realIdx.length) return `${head}\nПар нет`;
+  if (!realIdx.length) return { ...meta, note: 'no-lessons', rows: [] };
 
   let slice = entries.slice(realIdx[0], realIdx[realIdx.length - 1] + 1);
-  if (!showGaps) slice = slice.filter((e) => e.kind !== 'free');
+  if (opts.showGaps === false) slice = slice.filter((e) => e.kind !== 'free');
 
+  const rows = slice.map((e) => ({
+    kind: e.kind,
+    time: e.start && e.end ? `${e.start}–${e.end}` : e.start || '',
+    subject: e.kind === 'event' ? `🔔 ${e.subject}` : e.subject,
+    room: e.room || '',
+    teacher: e.teacher || '',
+    line: e.line,
+  }));
+  return { ...meta, note: null, rows };
+}
+
+/** Тот же контент простым текстом (CLI и обратная совместимость). */
+function scheduleText(data) {
+  const head = `Расписание на ${fmtDM(data.target)} (${data.weekday}), группа ${data.group}:`;
+  if (data.note === 'not-found') return `${head}\nГруппа не найдена в расписании на эту дату.`;
+  if (data.note === 'no-lessons') return `${head}\nПар нет`;
   const lines = [head];
-  for (const e of slice) {
-    let when = '';
-    if (e.start && e.end) when = `${e.start}–${e.end} — `;
-    else if (e.start) when = `${e.start} — `;
-    lines.push(when + (e.kind === 'event' ? '🔔 ' : '') + e.text);
+  for (const r of data.rows) {
+    const when = r.time ? `${r.time} — ` : '';
+    const prefix = r.kind === 'event' ? '🔔 ' : '';
+    lines.push(when + prefix + r.line);
   }
   return lines.join('\n');
 }
 
 function buildScheduleFromCsv(csvText, group, target, opts = {}) {
-  const rows = parseCsv(stripBom(String(csvText)));
-  const blocks = parseBlocks(rows);
-  if (!blocks.length) throw new UnavailableError('в таблице не найдено блоков расписания');
-  return formatMessage(buildEntries(blocks, group), group, target, opts.showGaps !== false);
+  return scheduleText(buildScheduleData(csvText, group, target, opts));
 }
 
 /** Человекочитаемая ссылка на таблицу-источник (для проверки пользователем). */
@@ -406,14 +438,14 @@ async function getSchedule(group, target, opts = {}) {
   const url = await resolveSheetUrl(cfg.calendarUrl, target);
   const csv = await downloadCsv(url);
   return {
-    text: buildScheduleFromCsv(csv, group, target, opts),
+    data: buildScheduleData(csv, group, target, opts),
     sheetUrl: url,
     humanUrl: humanSheetUrl(url),
   };
 }
 
 const getScheduleText = async (group, target, opts = {}) =>
-  (await getSchedule(group, target, opts)).text;
+  scheduleText((await getSchedule(group, target, opts)).data);
 
 // ---------------------------------------------------------------------------
 // Список всех групп (для выпадающего меню). Кэш на 1 час.
@@ -457,13 +489,15 @@ module.exports = {
   resolveSheetUrl,
   resolveLatestSheetUrl,
   downloadCsv,
+  buildScheduleData,
   buildScheduleFromCsv,
+  scheduleText,
   listAllGroups,
   // низкоуровневое (для тестов)
   parseCsv,
   parseBlocks,
   buildEntries,
-  formatMessage,
+  parseLesson,
   formatLesson,
   extractSheetLinks,
   findSheetUrl,
