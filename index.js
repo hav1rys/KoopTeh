@@ -280,6 +280,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('lk:')) return await onLookupButton(interaction);
       if (id.startsWith('wk:')) return await onWeekButton(interaction);
       if (id.startsWith('role:')) return await onRoleButton(interaction);
+      if (id.startsWith('set:')) return await onSettingsButton(interaction);
       if (id.startsWith('days:')) return await onDaysButton(interaction);
       if (id.startsWith('rem:')) return await onReminderButton(interaction);
       if (id.startsWith('mrn:')) return await onMorningButton(interaction);
@@ -427,6 +428,9 @@ async function onMenuButton(interaction) {
       return;
     case 'morning':
       await interaction.update(menu.buildMorningView(s));
+      return;
+    case 'settings':
+      await interaction.update(menu.buildSettingsView(s));
       return;
     case 'togglegaps':
       storage.setShowGaps(uid, !s.showGaps);
@@ -600,7 +604,7 @@ async function onRoleButton(interaction) {
 async function onDaysButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('days:'.length);
-  if (rest === 'done') return void (await interaction.update(menuView(uid)));
+  if (rest === 'done') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
   if (rest.startsWith('toggle:')) {
     const isoDay = Number(rest.slice('toggle:'.length));
     if (!(isoDay >= 1 && isoDay <= 7)) return;
@@ -615,7 +619,7 @@ async function onDaysButton(interaction) {
 async function onReminderButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('rem:'.length);
-  if (rest === 'done') return void (await interaction.update(menuView(uid)));
+  if (rest === 'done') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
   if (rest.startsWith('set:')) {
     const n = Number(rest.slice('set:'.length));
     if (!menu.REMINDER_OPTS.includes(n)) return;
@@ -627,11 +631,41 @@ async function onReminderButton(interaction) {
 async function onMorningButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('mrn:'.length);
-  if (rest === 'done') return void (await interaction.update(menuView(uid)));
+  if (rest === 'done') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
   if (rest === 'time') return void (await interaction.showModal(menu.morningTimeModal(effState(uid).morningTime)));
   if (rest === 'toggle') {
     storage.setMorning(uid, !effState(uid).morning);
     await interaction.update(menu.buildMorningView(effState(uid)));
+  }
+}
+
+async function onSettingsButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('set:'.length);
+  const s = effState(uid);
+  const back = () => interaction.update(menu.buildSettingsView(effState(uid)));
+
+  switch (rest) {
+    case 'back':
+      return void (await interaction.update(menuView(uid)));
+    case 'togglesub':
+      storage.setSubscribed(uid, !s.subscribed);
+      return void (await back());
+    case 'togglegaps':
+      storage.setShowGaps(uid, !s.showGaps);
+      return void (await back());
+    case 'format':
+      storage.setFormat(uid, s.format === 'text' ? 'embed' : 'text');
+      return void (await back());
+    case 'time':
+      return void (await interaction.showModal(menu.timeModal(storage.get(uid).time)));
+    case 'days':
+      return void (await interaction.update(menu.buildDaysView(s.days)));
+    case 'reminder':
+      return void (await interaction.update(menu.buildReminderView(s.reminderMinutes)));
+    case 'morning':
+      return void (await interaction.update(menu.buildMorningView(s)));
+    default:
   }
 }
 
@@ -752,14 +786,17 @@ async function onModal(interaction) {
 
   if (id === 'modal:time') {
     const raw = interaction.fields.getTextInputValue('time').trim();
-    if (!raw) {
+    if (raw) {
+      const hhmm = D.parseHHMM(raw);
+      if (!hhmm) return void (await interaction.reply({ content: 'Неверный формат. Нужно ЧЧ:ММ, например 18:30.' }));
+      storage.setTime(uid, hhmm);
+    } else {
       storage.setTime(uid, null);
-      return void (await sendMenu(interaction, uid));
     }
-    const hhmm = D.parseHHMM(raw);
-    if (!hhmm) return void (await interaction.reply({ content: 'Неверный формат. Нужно ЧЧ:ММ, например 18:30.' }));
-    storage.setTime(uid, hhmm);
-    return void (await sendMenu(interaction, uid));
+    const view = menu.buildSettingsView(effState(uid));
+    if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+    else await interaction.reply(view);
+    return;
   }
 
   if (id === 'modal:ask') {

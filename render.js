@@ -7,27 +7,37 @@ const path = require('path');
 const D = require('./dates');
 
 let canvas = null;
-let fontFamily = 'sans-serif';
+// latin-семейство первым (цифры, ':', '.', '·'), кириллица как fallback по глифам.
+let FONT = 'sans-serif';
 
 try {
   canvas = require('@napi-rs/canvas');
   try {
     const base = path.dirname(require.resolve('@fontsource/roboto/package.json'));
-    for (const f of [
-      'roboto-cyrillic-400-normal.woff',
-      'roboto-latin-400-normal.woff',
-      'roboto-cyrillic-700-normal.woff',
-      'roboto-latin-700-normal.woff',
-    ]) {
+    const reg = (file, family) => {
       try {
-        canvas.GlobalFonts.registerFromPath(path.join(base, 'files', f), 'Sched');
+        canvas.GlobalFonts.registerFromPath(path.join(base, 'files', file), family);
+        return true;
       } catch {
-        /* конкретный файл не нашёлся — пробуем следующий */
+        return false;
       }
-    }
-    if (canvas.GlobalFonts.families.some((x) => x.family === 'Sched')) fontFamily = 'Sched';
+    };
+    // 400 и 700 регистрируем под одним именем семейства — canvas сам выберет вес.
+    reg('roboto-latin-400-normal.woff', 'RobotoL');
+    reg('roboto-latin-700-normal.woff', 'RobotoL');
+    const okL = canvas.GlobalFonts.families.some((x) => x.family === 'RobotoL');
+    reg('roboto-cyrillic-400-normal.woff', 'RobotoC');
+    reg('roboto-cyrillic-700-normal.woff', 'RobotoC');
+    const okC = canvas.GlobalFonts.families.some((x) => x.family === 'RobotoC');
+    const list = [];
+    if (okL) list.push('"RobotoL"');
+    if (okC) list.push('"RobotoC"');
+    list.push('sans-serif');
+    FONT = list.join(', ');
+    // без нормального шрифта картинка нечитаемая — тогда лучше отключить её вовсе
+    if (!okL && !okC) canvas = null;
   } catch {
-    /* @fontsource не установлен — останется sans-serif (на alpine может не быть глифов) */
+    /* @fontsource не установлен — останется sans-serif (на alpine глифов может не быть) */
   }
 } catch {
   canvas = null;
@@ -79,7 +89,7 @@ function renderScheduleImage(data) {
 
   const cv = canvas.createCanvas(W, H);
   const ctx = cv.getContext('2d');
-  const F = fontFamily;
+  const F = FONT;
 
   ctx.fillStyle = CL.bg;
   ctx.fillRect(0, 0, W, H);
@@ -117,21 +127,21 @@ function renderScheduleImage(data) {
     ctx.fillText(r.pair ? `${r.pair} пара` : '', padX + 16, y + 24);
     ctx.fillStyle = CL.text;
     ctx.font = `400 15px ${F}`;
-    ctx.fillText(`${r.start}–${r.end}`, padX + 16, y + 45);
+    ctx.fillText(`${r.start}-${r.end}`, padX + 16, y + 45);
 
     const tx = padX + 128;
     if (r.kind === 'free') {
       ctx.fillStyle = CL.dim;
       ctx.font = `400 16px ${F}`;
-      ctx.fillText('— окно —', tx, y + 37);
+      ctx.fillText('- окно -', tx, y + 37);
     } else {
-      const subj = r.kind === 'event' ? String(r.subject).replace(/^🔔\s*/, '● ') : r.subject;
+      const subj = r.kind === 'event' ? String(r.subject).replace(/^🔔\s*/, '') : r.subject;
       ctx.fillStyle = '#ffffff';
       ctx.font = `700 16px ${F}`;
       ctx.fillText(fit(ctx, subj, W - tx - padX - 10), tx, y + 25);
       ctx.fillStyle = CL.dim;
       ctx.font = `400 13px ${F}`;
-      const meta = [r.teacher, r.room && `ауд. ${r.room}`].filter(Boolean).join('   ·   ');
+      const meta = [r.teacher, r.room && `ауд. ${r.room}`].filter(Boolean).join('    ');
       ctx.fillText(fit(ctx, meta, W - tx - padX - 10), tx, y + 46);
     }
     y += rowH + gap;

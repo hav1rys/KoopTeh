@@ -48,6 +48,7 @@ function buildMenu(s, extras = {}) {
   const noSubj = !s.subj;
   const teacherMode = s.role === 'teacher' && s.teacherName;
   const nb = extras.nextBroadcastEpoch;
+
   const fields = [
     {
       name: 'Роль',
@@ -55,23 +56,12 @@ function buildMenu(s, extras = {}) {
       inline: true,
     },
     { name: 'Группа', value: s.group ? `**${s.group}**` : '_не указана_', inline: true },
-    {
-      name: 'Рассылка',
-      value: noSubj ? '_нужна группа или фамилия_' : s.subscribed ? '✅ включена' : '⛔ выключена',
-      inline: true,
-    },
-    { name: 'Время', value: `🕘 ${s.time}${s.customTime ? '' : ' (по умолч.)'}`, inline: true },
-    { name: 'Дни', value: `📆 ${daysLabel(s.days)}`, inline: true },
-    { name: 'Напоминания', value: s.reminderMinutes ? `⏰ за ${s.reminderMinutes} мин` : '⏰ выкл', inline: true },
-    { name: 'Формат', value: s.format === 'text' ? '📄 текст' : '📊 эмбед', inline: true },
-    { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
   ];
-  fields.push({
-    name: 'Утро',
-    value: s.morning ? `☀️ ${s.morningTime}` : '☀️ выкл',
-    inline: true,
-  });
-  if (!noSubj && s.subscribed) {
+  if (noSubj) {
+    fields.push({ name: 'Рассылка', value: '_нужна группа или фамилия_', inline: true });
+  } else if (!s.subscribed) {
+    fields.push({ name: 'Рассылка', value: '⛔ выключена', inline: true });
+  } else {
     fields.push({
       name: 'Ближайшая рассылка',
       value: nb ? `📬 <t:${nb}:R> (<t:${nb}:t>)` : '—',
@@ -81,10 +71,11 @@ function buildMenu(s, extras = {}) {
   if (!noSubj && extras.nextPair) {
     fields.push({ name: 'Следующая пара', value: String(extras.nextPair).slice(0, 1024), inline: false });
   }
+
   const embed = new EmbedBuilder()
     .setColor(teacherMode ? C.teacher : C.weekday)
     .setTitle('🎓 Расписание — Кооперативный техникум')
-    .setDescription('Расписание пар приходит в личные сообщения. Настрой всё кнопками ниже.')
+    .setDescription('Расписание пар приходит в личные сообщения.')
     .addFields(fields)
     .setFooter({ text: 'Петрозаводск • koopteh10.ru' });
 
@@ -111,45 +102,64 @@ function buildMenu(s, extras = {}) {
       .setDisabled(noSubj),
   );
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('menu:togglesub')
-      .setLabel(s.subscribed ? 'Отключить рассылку' : 'Включить рассылку')
-      .setStyle(s.subscribed ? ButtonStyle.Danger : ButtonStyle.Success)
-      .setDisabled(noSubj),
-    new ButtonBuilder().setCustomId('menu:time').setLabel(`🕘 ${s.time}`).setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
-    new ButtonBuilder().setCustomId('menu:days').setLabel('📆 Дни').setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
-    new ButtonBuilder()
-      .setCustomId('menu:reminder')
-      .setLabel('⏰ Напоминания')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(noSubj),
-    new ButtonBuilder()
-      .setCustomId('menu:morning')
-      .setLabel('☀️ Утро')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(noSubj),
-  );
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('menu:togglegaps')
-      .setLabel(s.showGaps ? 'Окна: скрыть' : 'Окна: показать')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(noSubj),
-    new ButtonBuilder()
-      .setCustomId('menu:format')
-      .setLabel(s.format === 'text' ? 'Формат: текст' : 'Формат: эмбед')
-      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('menu:settings').setLabel('⚙️ Настройки').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:search').setLabel('🔍 Поиск').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:teacher').setLabel('👨‍🏫 Преподаватель').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:bell').setLabel('🔔 Звонки').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('menu:rooms').setLabel('🚪 Кабинеты').setStyle(ButtonStyle.Secondary),
   );
-  const row4 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('menu:rooms').setLabel('🚪 Свободные кабинеты').setStyle(ButtonStyle.Secondary),
+  const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('menu:ask').setLabel('❓ Задать вопрос').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:refresh').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
   );
 
-  return { content: '', embeds: [embed], components: [row1, row2, row3, row4] };
+  return { content: '', embeds: [embed], components: [row1, row2, row3] };
+}
+
+// ---- Настройки -----------------------------------------------------
+
+function buildSettingsView(s) {
+  const noSubj = !s.subj;
+  const embed = new EmbedBuilder()
+    .setColor(C.weekday)
+    .setTitle('⚙️ Настройки')
+    .addFields(
+      {
+        name: 'Рассылка',
+        value: noSubj ? '_нужна группа/фамилия_' : s.subscribed ? '✅ включена' : '⛔ выключена',
+        inline: true,
+      },
+      { name: 'Время', value: `🕘 ${s.time}${s.customTime ? '' : ' (по умолч.)'}`, inline: true },
+      { name: 'Дни', value: `📆 ${daysLabel(s.days)}`, inline: true },
+      { name: 'Напоминания', value: s.reminderMinutes ? `⏰ за ${s.reminderMinutes} мин` : '⏰ выкл', inline: true },
+      { name: 'Утро', value: s.morning ? `☀️ ${s.morningTime}` : '☀️ выкл', inline: true },
+      { name: 'Формат', value: s.format === 'text' ? '📄 текст' : '📊 эмбед', inline: true },
+      { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
+    );
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('set:togglesub')
+      .setLabel(s.subscribed ? 'Отключить рассылку' : 'Включить рассылку')
+      .setStyle(s.subscribed ? ButtonStyle.Danger : ButtonStyle.Success)
+      .setDisabled(noSubj),
+    new ButtonBuilder().setCustomId('set:time').setLabel(`🕘 ${s.time}`).setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
+    new ButtonBuilder().setCustomId('set:days').setLabel('📆 Дни').setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
+    new ButtonBuilder().setCustomId('set:reminder').setLabel('⏰ Напоминания').setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
+    new ButtonBuilder().setCustomId('set:morning').setLabel('☀️ Утро').setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('set:togglegaps')
+      .setLabel(s.showGaps ? 'Окна: скрыть' : 'Окна: показать')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(noSubj),
+    new ButtonBuilder()
+      .setCustomId('set:format')
+      .setLabel(s.format === 'text' ? 'Формат: текст' : 'Формат: эмбед')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('set:back').setLabel('← В меню').setStyle(ButtonStyle.Primary),
+  );
+  return { content: '', embeds: [embed], components: [row1, row2] };
 }
 
 // ---- Эмбед расписания (режимы group / teacher / search) --------------
@@ -299,18 +309,16 @@ function scheduleEmbed(data, humanUrl) {
   const desc = summary ? [...descLines, '', `📋 ${summary}`] : descLines;
   if (desc.length) embed.setDescription(desc.join('\n'));
 
+  // Выделяем только текущую пару (сегодня, режим группы).
   let curIdx = -1;
-  let nextIdx = -1;
   if (isToday && mode === 'group') {
     const now = D.tzNow();
     const nowMin = now.h * 60 + now.mi;
     data.rows.forEach((r, i) => {
-      if (r.kind !== 'lesson') return;
+      if (curIdx >= 0 || r.kind !== 'lesson') return;
       const sMin = D.toMinutes(r.start);
       const eMin = D.toMinutes(r.end);
-      if (sMin == null || eMin == null) return;
-      if (curIdx < 0 && sMin <= nowMin && nowMin < eMin) curIdx = i;
-      if (nextIdx < 0 && sMin > nowMin) nextIdx = i;
+      if (sMin != null && eMin != null && sMin <= nowMin && nowMin < eMin) curIdx = i;
     });
   }
 
@@ -318,11 +326,10 @@ function scheduleEmbed(data, humanUrl) {
   const col2 = [];
   const col3 = [];
   data.rows.forEach((r, i) => {
-    const mark = i === curIdx ? '🔴 ' : i === nextIdx ? '🟢 ' : '• ';
-    const b = i === curIdx || i === nextIdx;
-    const w = (t) => (b ? `**${t}**` : t);
-    const subj = r.icon ? `${r.icon} ${r.subject}` : r.subject || '—';
-    col1.push(w(`${mark}${timeCol(r)}`));
+    const cur = i === curIdx;
+    const w = (t) => (cur ? `**${t}**` : t);
+    const subj = r.subject || '—';
+    col1.push(w(`${cur ? '▸ ' : '• '}${timeCol(r)}`));
     if (mode === 'search') {
       col2.push(w(subj));
       col3.push(w([r.room && `каб. ${r.room}`, r.groupsText, r.teacher].filter(Boolean).join(' · ') || '—'));
@@ -397,7 +404,7 @@ function scheduleTextRich(data, humanUrl) {
       lines.push('**Предмет:** пар нет');
       continue;
     }
-    lines.push(`**Предмет:** ${r.icon ? `${r.icon} ${r.subject}` : r.subject}`);
+    lines.push(`**Предмет:** ${r.subject}`);
     if (r.room) lines.push(`**Кабинет:** ${r.room}`);
     if (mode === 'teacher') lines.push(`**Группы:** ${r.groupsText || '—'}`);
     else {
@@ -1073,6 +1080,7 @@ module.exports = {
   buildGroupPicker,
   buildDaysView,
   buildReminderView,
+  buildSettingsView,
   buildRoleView,
   setTeacherModal,
   buildMorningView,
