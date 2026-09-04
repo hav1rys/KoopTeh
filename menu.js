@@ -8,6 +8,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  RoleSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -928,7 +929,7 @@ function buildAdminMenu() {
   const embed = new EmbedBuilder()
     .setColor(ADMIN_COLOR)
     .setTitle('🛠 Панель администратора')
-    .setDescription('Объявления, статистика, управление админами.');
+    .setDescription('Объявления, статистика, админы, доступ к каналам.');
   return {
     content: '',
     embeds: [embed],
@@ -937,6 +938,57 @@ function buildAdminMenu() {
         new ButtonBuilder().setCustomId('adm:announce').setLabel('📢 Объявление').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('adm:stats').setLabel('📊 Статистика').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('adm:admins').setLabel('👥 Админы').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('adm:chanaccess').setLabel('📝 Доступ к каналам').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
+}
+
+/** Выбор канала, доступ к которому настраиваем. */
+function buildChannelAccessPick(channels, note) {
+  const embed = new EmbedBuilder()
+    .setColor(ADMIN_COLOR)
+    .setTitle('📝 Доступ к каналам')
+    .setDescription(
+      note || 'Выбери канал — дальше укажешь роли, которым разрешено туда писать. `@everyone` остаётся только на чтение.',
+    );
+  const rows = [];
+  if (channels.length) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('chac:pick')
+          .setPlaceholder('Выбери канал…')
+          .addOptions(channels.slice(0, 25).map((c) => ({ label: `#${c.name}`.slice(0, 100), value: c.id }))),
+      ),
+    );
+  } else {
+    embed.setDescription('Управляемых каналов не найдено. Запусти `/setup-server` на сервере.');
+  }
+  rows.push(adminBack());
+  return { content: '', embeds: [embed], components: rows };
+}
+
+/** Роль-селект: кому можно писать в конкретный канал. */
+function buildChannelAccessRoles(channelId, channelName, currentRoleIds) {
+  const embed = new EmbedBuilder()
+    .setColor(ADMIN_COLOR)
+    .setTitle(`📝 Кто может писать в #${channelName}`)
+    .setDescription('Выбери роли. Убери все — писать сможет только @everyone… нет, только админы (по правам сервера). Сохраняется сразу.');
+  const select = new RoleSelectMenuBuilder()
+    .setCustomId(`chac:roles:${channelId}`)
+    .setPlaceholder('Роли, которым можно писать')
+    .setMinValues(0)
+    .setMaxValues(20);
+  if (currentRoleIds && currentRoleIds.length) select.setDefaultRoles(currentRoleIds.slice(0, 20));
+  return {
+    content: '',
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(select),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('chac:back').setLabel('← К списку каналов').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('adm:menu').setLabel('В панель').setStyle(ButtonStyle.Secondary),
       ),
     ],
   };
@@ -1095,6 +1147,8 @@ module.exports = {
   buildAdminMenu,
   buildStatsView,
   buildAdminsView,
+  buildChannelAccessPick,
+  buildChannelAccessRoles,
   groupModal,
   timeModal,
   askModal,

@@ -73,6 +73,11 @@ module.exports = {
 
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
+  // Если задан — /setup-server и авто-роли работают на этом сервере.
+  provisionGuildId: (process.env.PROVISION_GUILD_ID || '').trim() || null,
+  // MEMBER_INTENT=1 — включить приём guildMemberAdd (роль «Гость» сразу при входе).
+  // Требует включённого «Server Members Intent» в Developer Portal, иначе бот не залогинится.
+  memberIntent: process.env.MEMBER_INTENT === '1',
   // секунды -> мс, но не больше 60 с на запрос (защита от опечаток вроде "300000")
   httpTimeout: Math.min(positiveNumber(process.env.HTTP_TIMEOUT, 20), 60) * 1000,
   logLevel: (process.env.LOG_LEVEL || 'INFO').toUpperCase(),
