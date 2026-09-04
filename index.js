@@ -55,14 +55,25 @@ function effState(uid) {
 const notPublishedText = (t) =>
   `Расписание на ${ss.fmtDM(t)} (${ss.weekdayRu(t)}) ещё не опубликовано на сайте.`;
 
+const withSource = (text, url) => (url ? `${text}\n\n🔗 Проверить: ${url}` : text);
+
+/** @returns {{ text: string, url: string|null }} */
 async function safeSchedule(group, target, showGaps) {
   try {
-    return await ss.getScheduleText(group, target, { showGaps });
+    const r = await ss.getSchedule(group, target, { showGaps });
+    return { text: r.text, url: r.humanUrl };
   } catch (err) {
-    if (err instanceof ss.NotPublishedError) return notPublishedText(target);
+    if (err instanceof ss.NotPublishedError) return { text: notPublishedText(target), url: null };
     log('WARN', `расписание (${group}, ${ss.fmtDMY(target)}): ${err.message}`);
-    return 'Не удалось получить расписание, попробуй позже.';
+    return { text: 'Не удалось получить расписание, попробуй позже.', url: null };
   }
+}
+
+/** Отправляет расписание отдельным сообщением (снимок, без навигации). */
+async function sendScheduleSnapshot(interaction, group, target, showGaps) {
+  await interaction.deferReply();
+  const { text, url } = await safeSchedule(group, target, showGaps);
+  await interaction.editReply({ content: withSource(text, url) });
 }
 
 // uid -> список групп (для листания без повторной загрузки)
@@ -190,10 +201,17 @@ async function onMenuButton(interaction) {
     case 'schedule': {
       await interaction.deferUpdate();
       const isoStr = D.iso(D.tomorrowParts());
-      const text = await safeSchedule(s.group, D.partsFromIso(isoStr), s.showGaps);
-      await interaction.editReply(menu.buildScheduleView(text, isoStr));
+      const { text, url } = await safeSchedule(s.group, D.partsFromIso(isoStr), s.showGaps);
+      await interaction.editReply(menu.buildScheduleView(text, isoStr, url));
       return;
     }
+    case 'now':
+      if (!s.group) {
+        await interaction.reply({ content: 'Сначала укажи группу.' });
+        return;
+      }
+      await sendScheduleSnapshot(interaction, s.group, D.tomorrowParts(), s.showGaps);
+      return;
     case 'togglesub': {
       storage.setSubscribed(uid, !s.subscribed);
       log('INFO', `${uid}: рассылка -> ${!s.subscribed ? 'вкл' : 'выкл'}`);
@@ -259,22 +277,38 @@ async function onGroupSelect(interaction) {
 async function onScheduleButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('sch:'.length);
+  const s = effState(uid);
 
   if (rest === 'menu') {
-    await interaction.update(menu.buildMenu(effState(uid)));
+    await interaction.update(menu.buildMenu(s));
     return;
   }
-  const target = D.partsFromIso(rest);
+
+  // Снимок отдельным сообщением
+  if (rest.startsWith('send:')) {
+    const t = D.partsFromIso(rest.slice('send:'.length));
+    if (!t || !s.group) return;
+    await sendScheduleSnapshot(interaction, s.group, t, s.showGaps);
+    return;
+  }
+
+  // Определяем целевую дату
+  let target = null;
+  if (rest === 'jump:today') target = D.todayParts();
+  else if (rest === 'jump:tomorrow') target = D.tomorrowParts();
+  else if (rest.startsWith('prev:') || rest.startsWith('next:')) {
+    const base = D.partsFromIso(rest.slice(5));
+    if (base) target = D.shiftParts(base, rest.startsWith('prev:') ? -1 : 1);
+  }
   if (!target) return;
 
-  const s = effState(uid);
   if (!s.group) {
     await interaction.reply({ content: 'Сначала укажи группу в меню (/start).' });
     return;
   }
   await interaction.deferUpdate();
-  const text = await safeSchedule(s.group, target, s.showGaps);
-  await interaction.editReply(menu.buildScheduleView(text, rest));
+  const { text, url } = await safeSchedule(s.group, target, s.showGaps);
+  await interaction.editReply(menu.buildScheduleView(text, D.iso(target), url));
 }
 
 async function onDaysButton(interaction) {
@@ -467,11 +501,13 @@ async function runBroadcast(due, target, targetIso) {
   log('INFO', `рассылка: ${due.length} получателей, дата ${ss.fmtDMY(target)}`);
 
   let csvText = null;
+  let humanUrl = null;
   let notPublished = false;
   let sourceFailed = false;
   try {
     const url = await ss.resolveSheetUrl(cfg.calendarUrl, target);
     csvText = await ss.downloadCsv(url);
+    humanUrl = ss.humanSheetUrl(url);
   } catch (err) {
     if (err instanceof ss.NotPublishedError) notPublished = true;
     else {
@@ -490,16 +526,15 @@ async function runBroadcast(due, target, targetIso) {
     else if (sourceFailed || !csvText) body = 'Не удалось получить расписание, попробую позже.';
     else {
       const key = `${ss.normGroup(u.group)}|${u.showGaps ? 1 : 0}`;
-      if (cache.has(key)) body = cache.get(key);
-      else {
+      if (!cache.has(key)) {
         try {
-          body = ss.buildScheduleFromCsv(csvText, u.group, target, { showGaps: u.showGaps });
+          cache.set(key, ss.buildScheduleFromCsv(csvText, u.group, target, { showGaps: u.showGaps }));
         } catch (err) {
           log('WARN', `рассылка: разбор для "${u.group}": ${err.message}`);
-          body = 'Не удалось получить расписание, попробую позже.';
+          cache.set(key, 'Не удалось получить расписание, попробую позже.');
         }
-        cache.set(key, body);
       }
+      body = withSource(cache.get(key), humanUrl);
     }
 
     try {

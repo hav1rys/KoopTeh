@@ -66,6 +66,11 @@ function buildMenu(s) {
       .setLabel('📅 Расписание')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(noGroup),
+    new ButtonBuilder()
+      .setCustomId('menu:now')
+      .setLabel('📨 Прислать на завтра')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(noGroup),
   );
 
   const row2 = new ActionRowBuilder().addComponents(
@@ -195,25 +200,41 @@ function buildDaysView(days) {
 
 // ---- Экран расписания с навигацией по датам --------------------------
 
-function buildScheduleView(text, isoStr) {
+function buildScheduleView(text, isoStr, humanUrl) {
   const todayIso = D.iso(D.todayParts());
   const tomIso = D.iso(D.tomorrowParts());
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`sch:${D.isoShift(isoStr, -1)}`).setLabel('◀').setStyle(ButtonStyle.Secondary),
+
+  // custom_id у стрелок и «Сегодня/Завтра» разных пространств имён —
+  // иначе при совпадении дат Discord ругается на дублирующийся custom_id.
+  const nav = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`sch:prev:${isoStr}`).setLabel('◀').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId(`sch:${todayIso}`)
+      .setCustomId('sch:jump:today')
       .setLabel('Сегодня')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(isoStr === todayIso),
     new ButtonBuilder()
-      .setCustomId(`sch:${tomIso}`)
+      .setCustomId('sch:jump:tomorrow')
       .setLabel('Завтра')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(isoStr === tomIso),
-    new ButtonBuilder().setCustomId(`sch:${D.isoShift(isoStr, 1)}`).setLabel('▶').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`sch:next:${isoStr}`).setLabel('▶').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('sch:menu').setLabel('В меню').setStyle(ButtonStyle.Primary),
   );
-  return { content: text.slice(0, 1900), embeds: [], components: [row] };
+
+  const actions = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`sch:send:${isoStr}`)
+      .setLabel('📨 Прислать сообщением')
+      .setStyle(ButtonStyle.Success),
+  );
+  if (humanUrl && /^https?:\/\//.test(humanUrl)) {
+    actions.addComponents(
+      new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(humanUrl).setLabel('🔗 Источник'),
+    );
+  }
+
+  return { content: text.slice(0, 1900), embeds: [], components: [nav, actions] };
 }
 
 // ---- Время рассылки -------------------------------------------------

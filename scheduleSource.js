@@ -392,12 +392,28 @@ function buildScheduleFromCsv(csvText, group, target, opts = {}) {
   return formatMessage(buildEntries(blocks, group), group, target, opts.showGaps !== false);
 }
 
-/** Полный путь: календарь -> CSV -> текст. Бросает NotPublishedError / UnavailableError. */
-async function getScheduleText(group, target, opts = {}) {
+/** Человекочитаемая ссылка на таблицу-источник (для проверки пользователем). */
+function humanSheetUrl(anyUrl) {
+  const m = /\/spreadsheets\/d\/(?:e\/)?([a-zA-Z0-9_-]+)/.exec(anyUrl || '');
+  return m ? `https://docs.google.com/spreadsheets/d/${m[1]}/edit` : null;
+}
+
+/**
+ * Полный путь: календарь -> CSV -> текст + ссылка на источник.
+ * Бросает NotPublishedError / UnavailableError.
+ */
+async function getSchedule(group, target, opts = {}) {
   const url = await resolveSheetUrl(cfg.calendarUrl, target);
   const csv = await downloadCsv(url);
-  return buildScheduleFromCsv(csv, group, target, opts);
+  return {
+    text: buildScheduleFromCsv(csv, group, target, opts),
+    sheetUrl: url,
+    humanUrl: humanSheetUrl(url),
+  };
 }
+
+const getScheduleText = async (group, target, opts = {}) =>
+  (await getSchedule(group, target, opts)).text;
 
 // ---------------------------------------------------------------------------
 // Список всех групп (для выпадающего меню). Кэш на 1 час.
@@ -434,7 +450,9 @@ module.exports = {
   fmtDM,
   fmtDMY,
   normGroup,
+  humanSheetUrl,
   // высокоуровневое
+  getSchedule,
   getScheduleText,
   resolveSheetUrl,
   resolveLatestSheetUrl,

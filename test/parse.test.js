@@ -103,3 +103,11 @@ test('извлечение ссылок из HTML-календаря', () => {
   // ссылка без gid -> экспорт без gid (первый лист), а не gid=0
   assert.equal(links.get(10), 'https://docs.google.com/spreadsheets/d/NOGID123/export?format=csv');
 });
+
+test('humanSheetUrl: из любой ссылки -> человекочитаемый /edit', () => {
+  assert.equal(
+    ss.humanSheetUrl('https://docs.google.com/spreadsheets/d/ABC_123/export?format=csv&gid=77'),
+    'https://docs.google.com/spreadsheets/d/ABC_123/edit',
+  );
+  assert.equal(ss.humanSheetUrl(''), null);
+});
