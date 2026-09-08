@@ -40,6 +40,11 @@ function positiveNumber(raw, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function finiteNumber(raw, fallback) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function validateTimezone(tz) {
   try {
     new Intl.DateTimeFormat('en-CA', { timeZone: tz });
@@ -70,6 +75,16 @@ module.exports = {
   // Статус бота. BOT_ACTIVITY пусто -> встроенная ротация (расписание / /start / N подписчиков).
   activity: (process.env.BOT_ACTIVITY || '').trim() || null,
   activityType: (process.env.BOT_ACTIVITY_TYPE || 'watching').trim().toLowerCase(),
+
+  // Погода в утреннем сообщении (open-meteo, без ключа). По умолчанию — Петрозаводск.
+  weatherEnabled: !/^(0|false|no|off)$/i.test((process.env.WEATHER_ENABLED || '').trim()),
+  weatherLat: finiteNumber(process.env.WEATHER_LAT, 61.7849),
+  weatherLon: finiteNumber(process.env.WEATHER_LON, 34.3469),
+  weatherPlace: (process.env.WEATHER_PLACE || 'Петрозаводск').trim(),
+
+  // Авто-алерт админам, если расписание не грузится дольше N часов в учебное время (Пн–Пт 07–20).
+  healthAlertEnabled: !/^(0|false|no|off)$/i.test((process.env.HEALTH_ALERT_ENABLED || '').trim()),
+  healthAlertHours: positiveNumber(process.env.HEALTH_ALERT_HOURS, 3),
 
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,

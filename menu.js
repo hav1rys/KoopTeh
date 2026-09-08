@@ -34,6 +34,10 @@ const timeCol = (r) => {
   const range = r.start && r.end ? `${r.start}–${r.end}` : r.start || '';
   return r.pair ? `${r.pair} · ${range}` : range;
 };
+const isoToDM = (iso) => {
+  const t = D.partsFromIso(iso);
+  return t ? D.fmtDM(t) : iso;
+};
 
 function daysLabel(days) {
   if (!days || !days.length) return '— (не присылать)';
@@ -61,6 +65,8 @@ function buildMenu(s, extras = {}) {
     fields.push({ name: 'Рассылка', value: '_нужна группа или фамилия_', inline: true });
   } else if (!s.subscribed) {
     fields.push({ name: 'Рассылка', value: '⛔ выключена', inline: true });
+  } else if (extras.pausedUntil) {
+    fields.push({ name: 'Рассылка', value: `⏸ пауза до ${isoToDM(extras.pausedUntil)}`, inline: true });
   } else {
     fields.push({
       name: 'Ближайшая рассылка',
@@ -75,16 +81,15 @@ function buildMenu(s, extras = {}) {
   const embed = new EmbedBuilder()
     .setColor(teacherMode ? C.teacher : C.weekday)
     .setTitle('🎓 Расписание — Кооперативный техникум')
-    .setDescription('Расписание пар приходит в личные сообщения.')
+    .setDescription(
+      noSubj
+        ? 'Чтобы начать — открой ⚙️ Настройки и укажи группу (или свою фамилию в разделе «Роль»).'
+        : 'Расписание пар приходит в личные сообщения.',
+    )
     .addFields(fields)
     .setFooter({ text: 'Петрозаводск • koopteh10.ru' });
 
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('menu:setgroup')
-      .setLabel(s.group ? 'Сменить группу' : 'Указать группу')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('menu:role').setLabel('👤 Роль').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('menu:schedule')
       .setLabel('📅 Расписание')
@@ -110,33 +115,153 @@ function buildMenu(s, extras = {}) {
   );
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('menu:ask').setLabel('❓ Задать вопрос').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('menu:help').setLabel('ℹ️ Помощь').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:refresh').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
   );
 
-  return { content: '', embeds: [embed], components: [row1, row2, row3] };
+  return { content: '', embeds: [embed], files: [], components: [row1, row2, row3] };
 }
+
+// ---- Помощь ------------------------------------------------------
+
+function buildHelpView({ inMenu = false } = {}) {
+  const embed = new EmbedBuilder()
+    .setColor(C.weekday)
+    .setTitle('ℹ️ Как пользоваться ботом')
+    .setDescription('Всё приходит в личные сообщения. Настройка — через `/start` → ⚙️ Настройки.')
+    .addFields(
+      {
+        name: 'Команды',
+        value: [
+          '`/start` — меню и все настройки',
+          '`/расписание [группа] [дата]` — расписание на день',
+          '`/сейчас` — текущая и следующая пара + до звонка',
+          '`/поиск` — кабинет, преподаватель, `предмет` (ближайшая пара), `группа` (что идёт сейчас), `пара` (свободен ли)',
+          '`/преподаватель <фамилия> [дата]` · `/преподаватели` — кто что ведёт',
+          '`/звонки` — расписание звонков · `/помощь` — эта справка',
+        ].join('\n'),
+      },
+      {
+        name: 'Кнопки в меню',
+        value: [
+          '📅 **Расписание / Неделя** — на сегодня и обзор пн–сб (неделю можно картинкой)',
+          '📨 **На завтра** — прислать расписание отдельным сообщением',
+          '📝 **Заметка к паре** — на экране расписания: «взять чертёж» и т.п.',
+          '🔍 **Поиск** · 👨‍🏫 **Преподаватель** · 🚪 **Кабинеты** · 🔔 **Звонки**',
+          '❓ **Задать вопрос** — написать администратору',
+        ].join('\n'),
+      },
+      {
+        name: '⚙️ Настройки',
+        value: [
+          'Группа и роль (студент / преподаватель)',
+          'Ежедневная рассылка: время, дни недели, вкл/выкл',
+          '⏸ Пауза — заглушить всё на время (практика, отпуск); напомнит за день до конца',
+          '⏰ Напоминания за N минут · ☀️ Утро (+ свой текст приветствия)',
+          'Формат: эмбед / текст / картинка · 🎨 цвет эмбеда · показывать ли «окна»',
+        ].join('\n'),
+      },
+    )
+    .setFooter({ text: 'Петрозаводск • koopteh10.ru' });
+  const components = inMenu
+    ? [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('menu:refresh').setLabel('← В меню').setStyle(ButtonStyle.Primary),
+        ),
+      ]
+    : [];
+  return { content: '', embeds: [embed], files: [], components };
+}
+
+// ---- Формат вывода расписания (эмбед / текст / картинка) ------------
+
+const fmtLabel = (f) => (f === 'image' ? 'картинка' : f === 'text' ? 'текст' : 'эмбед');
+const fmtField = (f) => (f === 'image' ? '🖼 картинка' : f === 'text' ? '📄 текст' : '📊 эмбед');
+
+/** Следующий формат по кругу. «Картинку» предлагаем только если рендер доступен. */
+function nextFormat(cur) {
+  const order = render.available() ? ['embed', 'text', 'image'] : ['embed', 'text'];
+  const i = order.indexOf(cur);
+  return order[(i + 1) % order.length];
+}
+
+// ---- Цветовая тема эмбеда расписания -------------------------------
+
+const THEMES = {
+  default: null,
+  blue: 0x2b6cb0,
+  green: 0x2f9e44,
+  purple: 0x7048e8,
+  teal: 0x1098ad,
+  orange: 0xd9822b,
+  pink: 0xd6336c,
+  graphite: 0x495057,
+};
+const THEME_LABEL = {
+  default: 'по умолчанию',
+  blue: '🔵 синяя',
+  green: '🟢 зелёная',
+  purple: '🟣 фиолетовая',
+  teal: '🩵 бирюзовая',
+  orange: '🟠 оранжевая',
+  pink: '🩷 розовая',
+  graphite: '⚫ графит',
+};
+const THEME_ORDER = Object.keys(THEMES);
+function nextTheme(cur) {
+  const i = THEME_ORDER.indexOf(cur);
+  return THEME_ORDER[(i + 1) % THEME_ORDER.length];
+}
+const themeColor = (theme) => (theme && THEMES[theme] != null ? THEMES[theme] : null);
 
 // ---- Настройки -----------------------------------------------------
 
 function buildSettingsView(s) {
   const noSubj = !s.subj;
+  const teacherMode = s.role === 'teacher' && s.teacherName;
+  const paused = s.pausedUntil && s.pausedUntil > D.iso(D.todayParts());
   const embed = new EmbedBuilder()
     .setColor(C.weekday)
     .setTitle('⚙️ Настройки')
     .addFields(
+      { name: 'Группа', value: s.group ? `**${s.group}**` : '_не указана_', inline: true },
+      {
+        name: 'Роль',
+        value: teacherMode ? `👨‍🏫 преподаватель — **${s.teacherName}**` : '🎓 студент',
+        inline: true,
+      },
       {
         name: 'Рассылка',
-        value: noSubj ? '_нужна группа/фамилия_' : s.subscribed ? '✅ включена' : '⛔ выключена',
+        value: noSubj
+          ? '_нужна группа/фамилия_'
+          : paused
+            ? `⏸ пауза до ${isoToDM(s.pausedUntil)}`
+            : s.subscribed
+              ? '✅ включена'
+              : '⛔ выключена',
         inline: true,
       },
       { name: 'Время', value: `🕘 ${s.time}${s.customTime ? '' : ' (по умолч.)'}`, inline: true },
       { name: 'Дни', value: `📆 ${daysLabel(s.days)}`, inline: true },
       { name: 'Напоминания', value: s.reminderMinutes ? `⏰ за ${s.reminderMinutes} мин` : '⏰ выкл', inline: true },
       { name: 'Утро', value: s.morning ? `☀️ ${s.morningTime}` : '☀️ выкл', inline: true },
-      { name: 'Формат', value: s.format === 'text' ? '📄 текст' : '📊 эмбед', inline: true },
+      { name: 'Формат', value: fmtField(s.format), inline: true },
+      { name: 'Цвет', value: `🎨 ${THEME_LABEL[s.theme] || s.theme || 'по умолчанию'}`, inline: true },
       { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
     );
   const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('set:group')
+      .setLabel(s.group ? '🎓 Сменить группу' : '🎓 Указать группу')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('set:role').setLabel('👤 Роль').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('set:pause')
+      .setLabel(paused ? '⏸ Пауза (вкл)' : '⏸ Пауза')
+      .setStyle(paused ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(noSubj),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('set:togglesub')
       .setLabel(s.subscribed ? 'Отключить рассылку' : 'Включить рассылку')
@@ -147,7 +272,7 @@ function buildSettingsView(s) {
     new ButtonBuilder().setCustomId('set:reminder').setLabel('⏰ Напоминания').setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
     new ButtonBuilder().setCustomId('set:morning').setLabel('☀️ Утро').setStyle(ButtonStyle.Secondary).setDisabled(noSubj),
   );
-  const row2 = new ActionRowBuilder().addComponents(
+  const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('set:togglegaps')
       .setLabel(s.showGaps ? 'Окна: скрыть' : 'Окна: показать')
@@ -155,11 +280,57 @@ function buildSettingsView(s) {
       .setDisabled(noSubj),
     new ButtonBuilder()
       .setCustomId('set:format')
-      .setLabel(s.format === 'text' ? 'Формат: текст' : 'Формат: эмбед')
+      .setLabel(`Формат: ${fmtLabel(s.format)}`)
       .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('set:theme').setLabel('🎨 Цвет').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('set:back').setLabel('← В меню').setStyle(ButtonStyle.Primary),
   );
-  return { content: '', embeds: [embed], components: [row1, row2] };
+  return { content: '', embeds: [embed], files: [], components: [row1, row2, row3] };
+}
+
+// ---- Пауза подписки -------------------------------------------------
+
+function buildPauseView(s) {
+  const active = s.pausedUntil && s.pausedUntil > D.iso(D.todayParts());
+  const embed = new EmbedBuilder()
+    .setColor(active ? C.none : C.weekday)
+    .setTitle('⏸ Пауза подписки')
+    .setDescription(
+      (active
+        ? `Сейчас на паузе. Рассылка, утро и напоминания вернутся **${isoToDM(s.pausedUntil)}**.`
+        : 'Заглушить рассылку, утреннее сообщение и напоминания на время (практика, отпуск, каникулы). Ручной просмотр и команды продолжают работать.') +
+        '\n\nВыбери, до какого дня молчать (в этот день всё включится само):',
+    );
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('pause:days:7').setLabel('на неделю').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('pause:days:14').setLabel('на 2 недели').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('pause:days:30').setLabel('на месяц').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('pause:date').setLabel('📅 До даты…').setStyle(ButtonStyle.Primary),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('pause:off')
+      .setLabel('Снять паузу')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!active),
+    new ButtonBuilder().setCustomId('pause:back').setLabel('← Назад').setStyle(ButtonStyle.Secondary),
+  );
+  return { content: '', embeds: [embed], files: [], components: [row1, row2] };
+}
+
+function pauseDateModal(current) {
+  const input = new TextInputBuilder()
+    .setCustomId('date')
+    .setLabel('Вернуться дд.мм (до этого дня — тишина)')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(10)
+    .setPlaceholder('20.09');
+  if (current) input.setValue(current);
+  return new ModalBuilder()
+    .setCustomId('modal:pausedate')
+    .setTitle('Пауза до даты')
+    .addComponents(new ActionRowBuilder().addComponents(input));
 }
 
 // ---- Эмбед расписания (режимы group / teacher / search) --------------
@@ -271,11 +442,15 @@ function summaryLine(data) {
   return `${when}: ${n} ${plural(n, 'пара', 'пары', 'пар')}, первая ${first.start}, до ${last.end}`;
 }
 
-function scheduleEmbed(data, humanUrl) {
+function scheduleEmbed(data, humanUrl, theme) {
   const mode = data.mode || 'group';
   const weekend = D.weekdayIso(data.target) >= 6;
   const isToday = D.iso(data.target) === D.iso(D.todayParts());
   const embed = new EmbedBuilder();
+  const applyTheme = () => {
+    const tc = themeColor(theme);
+    if (tc != null) embed.setColor(tc);
+  };
 
   let title;
   let descHead = null;
@@ -299,10 +474,12 @@ function scheduleEmbed(data, humanUrl) {
 
   if (data.note === 'not-found') {
     embed.setDescription(`${descLines.join('\n')}\n\nГруппа не найдена в расписании на эту дату.`);
+    applyTheme();
     return { content: '', embeds: [embed], components: [] };
   }
   if (data.note === 'no-lessons' || !data.rows.length) {
     embed.setDescription(`${descLines.length ? `${descLines.join('\n')}\n\n` : ''}**${noLessonsMsg(data)}**`);
+    applyTheme();
     return { content: '', embeds: [embed], components: [] };
   }
   const summary = summaryLine(data);
@@ -334,7 +511,8 @@ function scheduleEmbed(data, humanUrl) {
       col2.push(w(subj));
       col3.push(w([r.room && `каб. ${r.room}`, r.groupsText, r.teacher].filter(Boolean).join(' · ') || '—'));
     } else {
-      col2.push(w(r.room ? `${subj} | ${r.room}` : subj));
+      const c2 = r.room ? `${subj} | ${r.room}` : subj;
+      col2.push(w(c2 + (r.note ? ` — 📝 ${r.note}` : '')));
       col3.push(w((mode === 'teacher' ? r.groupsText : r.teacher) || '—'));
     }
   });
@@ -365,6 +543,7 @@ function scheduleEmbed(data, humanUrl) {
     }
   }
 
+  applyTheme();
   return { content: '', embeds: [embed], components: [] };
 }
 
@@ -406,6 +585,7 @@ function scheduleTextRich(data, humanUrl) {
     }
     lines.push(`**Предмет:** ${r.subject}`);
     if (r.room) lines.push(`**Кабинет:** ${r.room}`);
+    if (r.note) lines.push(`**📝 Заметка:** ${r.note}`);
     if (mode === 'teacher') lines.push(`**Группы:** ${r.groupsText || '—'}`);
     else {
       if (r.teacher) lines.push(`**Преподаватель:** ${r.teacher}`);
@@ -420,12 +600,45 @@ function scheduleTextRich(data, humanUrl) {
   return lines.join('\n');
 }
 
-/** Единый payload расписания: эмбед или текст (по настройке пользователя). */
-function scheduleMessage(data, humanUrl, format) {
+/** Текст «что именно поменялось» для уведомления об изменении расписания. */
+function changeSummaryText(target, diff) {
+  const label = (r) => {
+    const bits = [r.subject || '—'];
+    if (r.who) bits.push(r.who);
+    if (r.room) bits.push(`ауд. ${r.room}`);
+    const range = r.start && r.end ? ` (${r.start}–${r.end})` : '';
+    return bits.join(', ') + range;
+  };
+  const num = (r) => (r.pair != null ? `${r.pair} пара` : r.start || 'пара');
+  const total = diff.added.length + diff.removed.length + diff.changed.length;
+  if (total > 8) {
+    return `⚠️ **Расписание на ${D.fmtDM(target)} сильно изменилось** (${total} изменений), актуальная версия ниже:`;
+  }
+  const lines = [`📝 **Что изменилось на ${D.fmtDM(target)}:**`];
+  for (const c of diff.changed) lines.push(`• ${num(c.to)}: ${label(c.from)} → ${label(c.to)}`);
+  for (const r of diff.added) lines.push(`• добавилась ${num(r)}: ${label(r)}`);
+  for (const r of diff.removed) lines.push(`• убрали ${num(r)}: ${label(r)}`);
+  return lines.join('\n').slice(0, 1900);
+}
+
+/** Единый payload расписания: эмбед / текст / картинка (по настройке пользователя). */
+function scheduleMessage(data, humanUrl, format, theme) {
+  if (format === 'image') {
+    const buf = render.available() ? render.renderScheduleImage(data) : null;
+    if (buf) {
+      return {
+        content: '',
+        embeds: [],
+        files: [{ attachment: buf, name: `raspisanie-${D.iso(data.target)}.png` }],
+      };
+    }
+    // картинки нет (нет пар / режим не «группа» / нет canvas) — откат на эмбед
+    return scheduleEmbed(data, humanUrl, theme);
+  }
   if (format === 'text') {
     return { content: scheduleTextRich(data, humanUrl).slice(0, 1990), embeds: [] };
   }
-  return scheduleEmbed(data, humanUrl);
+  return scheduleEmbed(data, humanUrl, theme);
 }
 
 // ---- Экран расписания группы с навигацией по датам -------------------
@@ -450,9 +663,9 @@ function scheduleNav(isoStr) {
   );
 }
 
-function buildScheduleView(data, isoStr, humanUrl, errorText, format) {
+function buildScheduleView(data, isoStr, humanUrl, errorText, format, theme) {
   const nav = scheduleNav(isoStr);
-  if (errorText) return { content: errorText, embeds: [], components: [nav] };
+  if (errorText) return { content: errorText, embeds: [], files: [], components: [nav] };
 
   const canImg = render.available() && (data.mode || 'group') === 'group' && !data.note && data.rows.length;
   const actions = new ActionRowBuilder().addComponents(
@@ -471,13 +684,27 @@ function buildScheduleView(data, isoStr, humanUrl, errorText, format) {
     actions.addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(humanUrl).setLabel('🔗 Источник'));
   }
 
-  const base = scheduleMessage(data, humanUrl, format);
-  return { content: base.content || '', embeds: base.embeds, components: [nav, actions] };
+  const rows = [nav, actions];
+  if ((data.mode || 'group') === 'group' && !data.note) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`sch:note:${isoStr}`).setLabel('📝 Заметка к паре').setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+
+  const base = scheduleMessage(data, humanUrl, format, theme);
+  return {
+    content: base.content || '',
+    embeds: base.embeds || [],
+    files: base.files || [],
+    components: rows,
+  };
 }
 
 // ---- Экран поиска / преподавателя (навигация по датам через lookupState) ----
 
-function buildLookupView(data, humanUrl, format, errorText) {
+function buildLookupView(data, humanUrl, format, errorText, theme) {
   const nav = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('lk:prev').setLabel('◀').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('lk:day:today').setLabel('Сегодня').setStyle(ButtonStyle.Secondary),
@@ -485,7 +712,7 @@ function buildLookupView(data, humanUrl, format, errorText) {
     new ButtonBuilder().setCustomId('lk:next').setLabel('▶').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('lk:menu').setLabel('В меню').setStyle(ButtonStyle.Primary),
   );
-  if (errorText) return { content: errorText, embeds: [], components: [nav] };
+  if (errorText) return { content: errorText, embeds: [], files: [], components: [nav] };
   const rows = [nav];
   if (data && data.mode === 'teacher') {
     rows.push(
@@ -497,8 +724,8 @@ function buildLookupView(data, humanUrl, format, errorText) {
       ),
     );
   }
-  const base = scheduleMessage(data, humanUrl, format);
-  return { content: base.content || '', embeds: base.embeds, components: rows };
+  const base = scheduleMessage(data, humanUrl, format, theme);
+  return { content: base.content || '', embeds: base.embeds || [], files: base.files || [], components: rows };
 }
 
 // ---- Роль (студент / преподаватель) -----------------------------
@@ -644,8 +871,11 @@ function buildMorningView(s) {
     .setColor(C.weekday)
     .setTitle('☀️ Утреннее сообщение')
     .setDescription(
-      'Короткая сводка на сегодня утром: сколько пар и во сколько первая (или «выходной»).\n' +
-        `Сейчас: ${s.morning ? `**вкл, ${s.morningTime}**` : '**выкл**'}. Учитывает выбранные дни недели.`,
+      `Короткая сводка на сегодня утром: сколько пар и во сколько первая (или «выходной»)${
+        cfg.weatherEnabled ? `, плюс погода в ${cfg.weatherPlace}` : ''
+      }.\n` +
+        `Сейчас: ${s.morning ? `**вкл, ${s.morningTime}**` : '**выкл**'}. Учитывает выбранные дни недели.\n` +
+        `Приветствие: ${s.morningGreeting ? `«${s.morningGreeting}»` : '☀️ Доброе утро! _(по умолчанию)_'}`,
     );
   return {
     content: '',
@@ -657,10 +887,26 @@ function buildMorningView(s) {
           .setLabel(s.morning ? 'Выключить' : 'Включить')
           .setStyle(s.morning ? ButtonStyle.Danger : ButtonStyle.Success),
         new ButtonBuilder().setCustomId('mrn:time').setLabel(`🕗 ${s.morningTime}`).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('mrn:greeting').setLabel('✍️ Приветствие').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('mrn:done').setLabel('Готово').setStyle(ButtonStyle.Primary),
       ),
     ],
   };
+}
+
+function morningGreetingModal(current) {
+  const input = new TextInputBuilder()
+    .setCustomId('text')
+    .setLabel('Свой текст (пусто — вернуть по умолчанию)')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(120)
+    .setPlaceholder('☀️ Доброе утро, солнышко!');
+  if (current) input.setValue(current);
+  return new ModalBuilder()
+    .setCustomId('modal:morninggreeting')
+    .setTitle('Утреннее приветствие')
+    .addComponents(new ActionRowBuilder().addComponents(input));
 }
 
 function morningTimeModal(current) {
@@ -776,6 +1022,32 @@ function reportModal(iso) {
     );
 }
 
+function noteModal(iso) {
+  return new ModalBuilder()
+    .setCustomId(`modal:note:${iso}`)
+    .setTitle(`Заметка к паре — ${isoToDM(iso)}`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('pair')
+          .setLabel('Номер пары (1–7)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(1)
+          .setPlaceholder('3'),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('text')
+          .setLabel('Текст заметки (пусто — удалить)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(150)
+          .setPlaceholder('взять чертёж'),
+      ),
+    );
+}
+
 // ---- Сообщения вопрос/ответ администратору --------------------
 
 function adminQuestionMessage(q, qid) {
@@ -863,8 +1135,28 @@ function buildWeekView(week, format) {
     new ButtonBuilder().setCustomId('wk:next').setLabel('неделя ▶').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('wk:menu').setLabel('В меню').setStyle(ButtonStyle.Primary),
   );
-  if (format === 'text') return { content: weekText(week).slice(0, 1990), embeds: [], components: [nav] };
-  return { content: '', embeds: [weekEmbed(week)], components: [nav] };
+  const rows = [nav];
+  if (render.available()) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('wk:img').setLabel('🖼 Картинкой').setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+  if (format === 'text') return { content: weekText(week).slice(0, 1990), embeds: [], files: [], components: rows };
+  return { content: '', embeds: [weekEmbed(week)], files: [], components: rows };
+}
+
+/** Короткий ответ на /сейчас: текущая/следующая пара + статус звонков. */
+function buildNowMessage(data, label) {
+  const t = D.todayParts();
+  const lines = [`🎓 **${label}** — ${D.fmtDM(t)} (${D.weekdayRu(t)})`];
+  const npl = data && !data.note ? nextPairLine(data) : null;
+  if (!data || data.note === 'not-found') lines.push('расписание на сегодня не найдено');
+  else if (data.note === 'no-lessons' || !npl) lines.push(data.weekend ? 'сегодня выходной 🎉' : 'на сегодня пар нет');
+  else lines.push(npl);
+  lines.push(`🔔 ${bellStatus(t)}`);
+  return { content: lines.join('\n') };
 }
 
 // ---- Расписание звонков --------------------------------------
@@ -928,18 +1220,121 @@ function buildAdminMenu() {
   const embed = new EmbedBuilder()
     .setColor(ADMIN_COLOR)
     .setTitle('🛠 Панель администратора')
-    .setDescription('Объявления, статистика, управление админами.');
+    .setDescription('Объявления (в т.ч. отложенные и по группе), статистика, состояние источника, журнал, админы.');
   return {
     content: '',
     embeds: [embed],
     components: [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('adm:announce').setLabel('📢 Объявление').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('adm:schann').setLabel('🕓 Отложенные').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('adm:stats').setLabel('📊 Статистика').setStyle(ButtonStyle.Secondary),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('adm:health').setLabel('🩺 Источник').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('adm:log').setLabel('🧾 Журнал').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('adm:admins').setLabel('👥 Админы').setStyle(ButtonStyle.Secondary),
       ),
     ],
   };
+}
+
+function buildAdminLogView(entries) {
+  const body =
+    entries
+      .map((e) => `• <t:${Math.floor(e.at / 1000)}:R> · \`…${String(e.adminId).slice(-4)}\` — ${e.action}`)
+      .join('\n') || 'пусто';
+  const embed = new EmbedBuilder()
+    .setColor(ADMIN_COLOR)
+    .setTitle('🧾 Журнал действий')
+    .setDescription(body.slice(0, 4000));
+  return { content: '', embeds: [embed], components: [adminBack()] };
+}
+
+function buildSchedAnnView(list) {
+  const body =
+    list
+      .map(
+        (x) =>
+          `• \`${x.id}\` — ${isoToDM(x.atIso)} ${x.atHHMM} · ${x.group ? x.group : 'всем'}\n  ${String(x.text).replace(/\n/g, ' ').slice(0, 80)}`,
+      )
+      .join('\n') || 'Запланированных объявлений нет.';
+  const embed = new EmbedBuilder()
+    .setColor(ADMIN_COLOR)
+    .setTitle('🕓 Отложенные объявления')
+    .setDescription(body.slice(0, 4000));
+  const rows = [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('adm:schann:add').setLabel('➕ Запланировать').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('adm:menu').setLabel('← Назад').setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+  for (let i = 0; i < list.length && rows.length < 5; i += 5) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        ...list.slice(i, i + 5).map((x) =>
+          new ButtonBuilder()
+            .setCustomId(`adm:schann:del:${x.id}`)
+            .setLabel(`✖ ${x.id}`)
+            .setStyle(ButtonStyle.Danger),
+        ),
+      ),
+    );
+  }
+  return { content: '', embeds: [embed], components: rows };
+}
+
+function schedAnnModal() {
+  return new ModalBuilder()
+    .setCustomId('modal:schann')
+    .setTitle('Отложенное объявление')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('text').setLabel('Текст объявления').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1500),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('when').setLabel('Когда: дд.мм ЧЧ:ММ').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(16).setPlaceholder('12.09 08:00'),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('group').setLabel('Группа (пусто — всем)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(40),
+      ),
+    );
+}
+
+/** «Состояние источника» — когда последний раз удалось/не удалось загрузить расписание. */
+function buildHealthView(h) {
+  const rel = (ms) => (ms ? `<t:${Math.floor(ms / 1000)}:R>` : '—');
+  const okAge = h.lastOkAt ? Date.now() - h.lastOkAt : null;
+  const dot = okAge == null ? '⚪' : okAge < 20 * 60 * 1000 ? '🟢' : okAge < 60 * 60 * 1000 ? '🟡' : '🔴';
+  const state =
+    okAge == null
+      ? 'загрузок ещё не было'
+      : okAge < 20 * 60 * 1000
+        ? 'работает'
+        : okAge < 60 * 60 * 1000
+          ? 'давно не обновлялось'
+          : 'похоже, источник недоступен';
+
+  const embed = new EmbedBuilder()
+    .setColor(okAge != null && okAge < 60 * 60 * 1000 ? C.none : C.error)
+    .setTitle(`${dot} Состояние источника — ${state}`)
+    .addFields(
+      {
+        name: 'Последняя успешная загрузка',
+        value: h.lastOkAt ? `${rel(h.lastOkAt)}${h.lastOkIso ? ` · расписание на ${h.lastOkIso}` : ''}` : 'ещё не было',
+        inline: false,
+      },
+      { name: 'Последняя попытка', value: rel(h.lastTryAt), inline: true },
+      {
+        name: 'Последняя ошибка',
+        value: h.lastErrAt
+          ? `${rel(h.lastErrAt)} · ${h.lastErrKind === 'not-published' ? 'нет ссылки на дату (норма для будущих дней)' : 'источник недоступен'}\n\`${clip(String(h.lastErrMsg || '—'))}\``
+          : '—',
+        inline: false,
+      },
+    )
+    .setFooter({ text: 'koopteh10.ru → Google Sheets (CSV)' });
+  return { content: '', embeds: [embed], files: [], components: [adminBack()] };
 }
 
 function buildStatsView(s) {
@@ -958,7 +1353,8 @@ function buildStatsView(s) {
       { name: 'Подписано', value: String(s.subscribed), inline: true },
       { name: 'Преподавателей', value: String(s.teachers || 0), inline: true },
       { name: 'Напоминания вкл', value: String(s.reminders), inline: true },
-      { name: 'Текстовый формат', value: String(s.textFormat), inline: true },
+      { name: 'Формат: текст', value: String(s.textFormat), inline: true },
+      { name: 'Формат: картинка', value: String(s.imageFormat || 0), inline: true },
       { name: 'Открытых вопросов', value: String(s.openQuestions), inline: true },
       { name: 'Подписки по группам', value: clip(top) },
     );
@@ -1005,6 +1401,15 @@ function announceModal() {
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
           .setMaxLength(1800),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('group')
+          .setLabel('Группа (пусто — всем подписчикам)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(40)
+          .setPlaceholder('209ИС-2'),
       ),
     );
 }
@@ -1081,18 +1486,31 @@ module.exports = {
   buildDaysView,
   buildReminderView,
   buildSettingsView,
+  buildHelpView,
+  buildPauseView,
+  pauseDateModal,
+  nextFormat,
+  nextTheme,
   buildRoleView,
   setTeacherModal,
   buildMorningView,
   morningTimeModal,
+  morningGreetingModal,
   nextPairLine,
   buildWeekView,
+  buildNowMessage,
   bellView,
   scheduleEmbed,
   scheduleMessage,
+  changeSummaryText,
   buildScheduleView,
   buildLookupView,
+  noteModal,
   buildAdminMenu,
+  buildAdminLogView,
+  buildSchedAnnView,
+  schedAnnModal,
+  buildHealthView,
   buildStatsView,
   buildAdminsView,
   groupModal,

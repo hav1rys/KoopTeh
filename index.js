@@ -5,6 +5,7 @@ const {
   GatewayIntentBits,
   Events,
   ActivityType,
+  MessageFlags,
   SlashCommandBuilder,
   ApplicationIntegrationType,
   InteractionContextType,
@@ -15,6 +16,7 @@ const D = require('./dates');
 const storage = require('./storage');
 const ss = require('./scheduleSource');
 const render = require('./render');
+const weather = require('./weather');
 const menu = require('./menu');
 
 if (!cfg.token) {
@@ -68,13 +70,31 @@ function effState(uid) {
     reminderMinutes: s.reminderMinutes,
     morning: s.morning,
     morningTime: s.morningTime,
+    morningGreeting: s.morningGreeting,
+    pausedUntil: s.pausedUntil,
+    theme: s.theme || 'default',
+  };
+}
+
+/** Активна ли пауза подписки прямо сейчас (pausedUntil строго в будущем). */
+const isPaused = (pausedUntil) => Boolean(pausedUntil) && pausedUntil > D.iso(D.todayParts());
+
+/** Прикрепляет личные заметки пользователя к строкам расписания (режим группы, конкретная дата). */
+function attachNotes(data, uid, iso) {
+  if (!data || (data.mode || 'group') !== 'group' || !Array.isArray(data.rows)) return data;
+  const notes = storage.getNotesForDay(uid, iso);
+  if (!notes || !Object.keys(notes).length) return data;
+  return {
+    ...data,
+    rows: data.rows.map((r) => (r.pair != null && notes[r.pair] ? { ...r, note: notes[r.pair] } : r)),
   };
 }
 
 /** Меню + виджеты «ближайшая рассылка» и «следующая пара» (из кэша, без сети). */
 function menuView(uid) {
   const s = effState(uid);
-  const nb = s.subj && s.subscribed ? D.nextBroadcast(s.days, s.time) : null;
+  const paused = isPaused(s.pausedUntil);
+  const nb = s.subj && s.subscribed && !paused ? D.nextBroadcast(s.days, s.time) : null;
   let nextPair = null;
   if (s.subj) {
     try {
@@ -89,11 +109,37 @@ function menuView(uid) {
       /* ignore */
     }
   }
-  return menu.buildMenu(s, { nextBroadcastEpoch: nb, nextPair });
+  return menu.buildMenu(s, { nextBroadcastEpoch: nb, nextPair, pausedUntil: paused ? s.pausedUntil : null });
 }
 
 const notPublishedText = (t) =>
   `Расписание на ${ss.fmtDM(t)} (${ss.weekdayRu(t)}) ещё не опубликовано на сайте.`;
+
+const DM_OK = '📬 Отправил тебе в личные сообщения.';
+const DM_FAIL =
+  '❌ Не смог написать тебе в ЛС. Открой личные сообщения боту (в настройках приватности сервера разреши сообщения от участников) и повтори команду.';
+
+/**
+ * Результат любой слэш-команды уходит пользователю в ЛС.
+ * В самих ЛС с ботом — отвечаем на месте. На сервере — эфемерное «ок» + сообщение в ЛС.
+ * Вызывать после (опционального) deferReply.
+ */
+async function deliver(interaction, payload) {
+  if (!interaction.inGuild()) {
+    if (interaction.deferred || interaction.replied) return void (await interaction.editReply(payload));
+    return void (await interaction.reply(payload));
+  }
+  let failed = false;
+  try {
+    await interaction.user.send(payload);
+  } catch (err) {
+    failed = true;
+    log('WARN', `ЛС ${interaction.user.id}: ${err.message || err}`);
+  }
+  const ack = { content: failed ? DM_FAIL : DM_OK };
+  if (interaction.deferred || interaction.replied) await interaction.editReply(ack);
+  else await interaction.reply({ ...ack, flags: MessageFlags.Ephemeral });
+}
 
 /** @returns {{ data: object|null, url: string|null, error: string|null }} */
 async function safeSchedule(subj, target, showGaps) {
@@ -116,18 +162,20 @@ async function renderSchedule(interaction, uid, target) {
   });
   const s = effState(uid);
   const { data, url, error } = await safeSchedule(s.subj, target, s.showGaps);
-  await interaction.editReply(menu.buildScheduleView(data, D.iso(target), url, error, s.format));
+  const withNotes = data ? attachNotes(data, uid, D.iso(target)) : data;
+  await interaction.editReply(menu.buildScheduleView(withNotes, D.iso(target), url, error, s.format, s.theme));
 }
 
 /** Снимок расписания отдельным сообщением. */
-async function sendScheduleSnapshot(interaction, subj, target, showGaps, format) {
+async function sendScheduleSnapshot(interaction, subj, target, showGaps, format, theme, uid) {
   await interaction.deferReply();
   const { data, url, error } = await safeSchedule(subj, target, showGaps);
   if (error) {
     await interaction.editReply({ content: error, embeds: [] });
     return;
   }
-  await interaction.editReply(menu.scheduleMessage(data, url, format));
+  const d = uid ? attachNotes(data, uid, D.iso(target)) : data;
+  await interaction.editReply(menu.scheduleMessage(d, url, format, theme));
 }
 
 // -------- поиск / преподаватель (разовый просмотр с навигацией по датам) ------
@@ -143,19 +191,33 @@ async function runLookup(kind, params, target) {
   return { data, humanUrl };
 }
 
-/** Показывает экран поиска/преподавателя. fresh:true — из слэш-команды (deferReply), иначе из кнопки/модалки (update). */
+/** Показывает экран поиска/преподавателя. fresh:true — из слэш-команды (в ЛС), иначе из кнопки/модалки (update). */
 async function showLookup(interaction, uid, kind, params, target, { fresh = false } = {}) {
-  if (fresh) await interaction.deferReply();
+  const toDM = fresh && interaction.inGuild();
+  if (fresh) await interaction.deferReply(toDM ? { flags: MessageFlags.Ephemeral } : {});
   else await interaction.update({ content: '⏳ Ищу…', embeds: [], components: [] });
   const s = effState(uid);
   lookupState.set(uid, { kind, params, iso: D.iso(target) });
+  let view;
   try {
     const { data, humanUrl } = await runLookup(kind, params, target);
-    await interaction.editReply(menu.buildLookupView(data, humanUrl, s.format));
+    view = menu.buildLookupView(data, humanUrl, s.format, undefined, s.theme);
   } catch (err) {
     const msg = err instanceof ss.NotPublishedError ? notPublishedText(target) : 'Не удалось выполнить поиск, попробуй позже.';
     if (!(err instanceof ss.NotPublishedError)) log('WARN', `lookup ${kind}: ${err.message}`);
-    await interaction.editReply(menu.buildLookupView(null, null, s.format, msg));
+    view = menu.buildLookupView(null, null, s.format, msg, s.theme);
+  }
+  if (toDM) {
+    let failed = false;
+    try {
+      await interaction.user.send(view);
+    } catch (err) {
+      failed = true;
+      log('WARN', `ЛС ${uid}: ${err.message || err}`);
+    }
+    await interaction.editReply({ content: failed ? DM_FAIL : DM_OK });
+  } else {
+    await interaction.editReply(view);
   }
 }
 
@@ -226,16 +288,24 @@ function commandDefs() {
       .addStringOption((o) => o.setName('дата').setDescription('дд.мм (по умолчанию сегодня)')),
     new SlashCommandBuilder()
       .setName('поиск')
-      .setDescription('Поиск по кабинету и/или преподавателю')
-      .addStringOption((o) => o.setName('кабинет').setDescription('Номер кабинета'))
+      .setDescription('Кабинет, преподаватель, предмет, «что у группы сейчас», занятость на паре')
+      .addStringOption((o) => o.setName('кабинет').setDescription('Номер кабинета').setAutocomplete(true))
       .addStringOption((o) => o.setName('преподаватель').setDescription('Фамилия').setAutocomplete(true))
+      .addStringOption((o) => o.setName('предмет').setDescription('Название — найду ближайшую пару у твоей группы'))
+      .addStringOption((o) => o.setName('группа').setDescription('Что у этой группы идёт прямо сейчас').setAutocomplete(true))
+      .addIntegerOption((o) =>
+        o.setName('пара').setDescription('1–7: свободен ли кабинет/преподаватель на этой паре').setMinValue(1).setMaxValue(7),
+      )
       .addStringOption((o) => o.setName('дата').setDescription('дд.мм')),
     new SlashCommandBuilder()
       .setName('преподаватель')
       .setDescription('Пары преподавателя за день')
       .addStringOption((o) => o.setName('фамилия').setDescription('Фамилия').setRequired(true).setAutocomplete(true))
       .addStringOption((o) => o.setName('дата').setDescription('дд.мм')),
+    new SlashCommandBuilder().setName('преподаватели').setDescription('Кто какие предметы ведёт'),
+    new SlashCommandBuilder().setName('сейчас').setDescription('Текущая и следующая пара + до звонка'),
     new SlashCommandBuilder().setName('звонки').setDescription('Расписание звонков и текущий статус'),
+    new SlashCommandBuilder().setName('помощь').setDescription('Что умеет бот: команды и кнопки'),
     new SlashCommandBuilder().setName('admin').setDescription('Панель администратора'),
   ];
 }
@@ -281,6 +351,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('wk:')) return await onWeekButton(interaction);
       if (id.startsWith('role:')) return await onRoleButton(interaction);
       if (id.startsWith('set:')) return await onSettingsButton(interaction);
+      if (id.startsWith('pause:')) return await onPauseButton(interaction);
       if (id.startsWith('days:')) return await onDaysButton(interaction);
       if (id.startsWith('rem:')) return await onReminderButton(interaction);
       if (id.startsWith('mrn:')) return await onMorningButton(interaction);
@@ -311,6 +382,7 @@ async function onAutocomplete(interaction) {
   try {
     if (f.name === 'группа') list = await ss.listAllGroups();
     else if (f.name === 'преподаватель' || f.name === 'фамилия') list = await ss.listAllTeachers();
+    else if (f.name === 'кабинет') list = await ss.listAllRooms();
   } catch {
     /* ignore */
   }
@@ -321,46 +393,117 @@ async function onAutocomplete(interaction) {
 async function onSlash(interaction) {
   const uid = interaction.user.id;
   const name = interaction.commandName;
+  const eph = interaction.inGuild() ? { flags: MessageFlags.Ephemeral } : {};
 
-  if (name === 'start') {
-    await interaction.reply(menuView(uid));
-    return;
-  }
+  if (name === 'start') return void (await deliver(interaction, menuView(uid)));
 
   if (name === 'admin') {
-    if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.' }));
-    await interaction.reply(menu.buildAdminMenu());
-    return;
+    if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.', ...eph }));
+    return void (await deliver(interaction, menu.buildAdminMenu()));
   }
 
-  if (name === 'звонки') {
-    await interaction.reply(menu.bellView());
+  if (name === 'звонки') return void (await deliver(interaction, menu.bellView()));
+
+  if (name === 'помощь') return void (await deliver(interaction, menu.buildHelpView()));
+
+  if (name === 'преподаватели') {
+    await interaction.deferReply(eph);
+    let list = [];
+    try {
+      list = await ss.listTeachersWithSubjects();
+    } catch (err) {
+      log('WARN', `преподаватели: ${err.message}`);
+    }
+    if (!list.length) {
+      return void (await deliver(interaction, { content: 'Не удалось получить список преподавателей, попробуй позже.' }));
+    }
+    const text = list.map((x) => `• ${x.teacher} — ${x.subjects.join(', ')}`).join('\n');
+    if (text.length <= 1900) {
+      await deliver(interaction, { content: `👨‍🏫 **Преподаватели (${list.length})**\n${text}` });
+    } else {
+      await deliver(interaction, {
+        content: `👨‍🏫 Преподаватели (${list.length}) — списком в файле:`,
+        files: [{ attachment: Buffer.from(text, 'utf8'), name: 'prepodavateli.txt' }],
+      });
+    }
     return;
   }
 
   const s = effState(uid);
 
+  if (name === 'сейчас') {
+    if (!s.subj) return void (await interaction.reply({ content: 'Сначала укажи группу или фамилию через /start.', ...eph }));
+    await interaction.deferReply(eph);
+    const today = D.todayParts();
+    let data = null;
+    try {
+      data = buildDayData((await ss.fetchDayCsv(today, 5 * 60 * 1000)).csvText, s.subj, today, {});
+    } catch {
+      /* нет данных */
+    }
+    await deliver(interaction, menu.buildNowMessage(data, s.subj.name));
+    return;
+  }
+
   if (name === 'расписание') {
     const grpParam = (interaction.options.getString('группа') || '').trim();
     const subj = grpParam ? { kind: 'group', name: grpParam } : s.subj;
     if (!subj) {
-      return void (await interaction.reply({ content: 'Укажи группу параметром или сохрани её через /start.' }));
+      return void (await interaction.reply({ content: 'Укажи группу параметром или сохрани её через /start.', ...eph }));
     }
     const target = parseDateField(interaction.options.getString('дата'));
-    if (!target) return void (await interaction.reply({ content: 'Не понял дату. Формат: дд.мм.' }));
-    await interaction.deferReply();
+    if (!target) return void (await interaction.reply({ content: 'Не понял дату. Формат: дд.мм.', ...eph }));
+    await interaction.deferReply(eph);
     const { data, url, error } = await safeSchedule(subj, target, s.showGaps);
-    if (error) return void (await interaction.editReply({ content: error, embeds: [] }));
-    await interaction.editReply(menu.scheduleMessage(data, url, s.format));
+    // заметки — только для «своей» группы (без параметра «группа»)
+    const d = data && !grpParam ? attachNotes(data, uid, D.iso(target)) : data;
+    await deliver(interaction, error ? { content: error, embeds: [] } : menu.scheduleMessage(d, url, s.format, s.theme));
     return;
   }
 
   if (name === 'поиск') {
     const room = (interaction.options.getString('кабинет') || '').trim();
     const teacher = (interaction.options.getString('преподаватель') || '').trim();
-    if (!room && !teacher) return void (await interaction.reply({ content: 'Укажи кабинет или преподавателя.' }));
+    const subject = (interaction.options.getString('предмет') || '').trim();
+    const grpParam = (interaction.options.getString('группа') || '').trim();
+    const pairNo = interaction.options.getInteger('пара');
     const target = parseDateField(interaction.options.getString('дата'));
-    if (!target) return void (await interaction.reply({ content: 'Не понял дату. Формат: дд.мм.' }));
+    if (!target) return void (await interaction.reply({ content: 'Не понял дату. Формат: дд.мм.', ...eph }));
+
+    // «Что у группы сейчас»
+    if (grpParam && !room && !teacher && !subject && !pairNo) {
+      await interaction.deferReply(eph);
+      let data = null;
+      try {
+        data = ss.buildScheduleData((await ss.fetchDayCsv(D.todayParts(), 5 * 60 * 1000)).csvText, grpParam, D.todayParts(), {});
+      } catch {
+        /* нет данных */
+      }
+      await deliver(interaction, menu.buildNowMessage(data, grpParam));
+      return;
+    }
+
+    // «Когда ближайшая <предмет>»
+    if (subject) {
+      const g = grpParam || (s.subj && s.subj.kind === 'group' ? s.subj.name : null);
+      if (!g) {
+        return void (await interaction.reply({ content: 'Укажи группу параметром или сохрани её через /start.', ...eph }));
+      }
+      await interaction.deferReply(eph);
+      await deliver(interaction, { content: await findNextSubject(g, subject, target) });
+      return;
+    }
+
+    // «Свободен ли кабинет/преподаватель на N паре»
+    if (pairNo && (room || teacher)) {
+      await interaction.deferReply(eph);
+      await deliver(interaction, { content: await pairAvailability({ room, teacher }, pairNo, target) });
+      return;
+    }
+
+    if (!room && !teacher) {
+      return void (await interaction.reply({ content: 'Укажи кабинет, преподавателя, предмет или группу.', ...eph }));
+    }
     await showLookup(interaction, uid, 'search', { room, teacher }, target, { fresh: true });
     return;
   }
@@ -368,9 +511,53 @@ async function onSlash(interaction) {
   if (name === 'преподаватель') {
     const surname = interaction.options.getString('фамилия').trim();
     const target = parseDateField(interaction.options.getString('дата'));
-    if (!target) return void (await interaction.reply({ content: 'Не понял дату. Формат: дд.мм.' }));
+    if (!target) return void (await interaction.reply({ content: 'Не понял дату. Формат: дд.мм.', ...eph }));
     await showLookup(interaction, uid, 'teacher', { surname }, target, { fresh: true });
   }
+}
+
+/** «Когда ближайшая <предмет>» — сканирует до 10 дней от target для группы g. */
+async function findNextSubject(g, subject, startTarget) {
+  for (let i = 0; i < 10; i++) {
+    const day = D.shiftParts(startTarget, i);
+    let data;
+    try {
+      data = ss.buildScheduleData((await ss.fetchDayCsv(day, 5 * 60 * 1000)).csvText, g, day, {});
+    } catch {
+      continue;
+    }
+    if (!data || data.note) continue;
+    const hit = data.rows.find((r) => r.kind === 'lesson' && ss.subjectMatches(r.subject, subject));
+    if (hit) {
+      const when = i === 0 ? 'сегодня' : i === 1 ? 'завтра' : `${D.fmtDM(day)} (${D.weekdayRu(day)})`;
+      const where = hit.room ? `, ауд. ${hit.room}` : '';
+      const who = hit.teacher ? `, ${hit.teacher}` : '';
+      return `🔎 Ближайшая «${subject}» у ${g}: ${when}, ${hit.pair ? `${hit.pair}. ` : ''}${hit.start || ''}${where}${who}`;
+    }
+  }
+  return `🔎 «${subject}» у группы ${g} не нашёл в ближайшие 10 дней.`;
+}
+
+/** «Свободен ли кабинет/преподаватель на N паре» на дату target. */
+async function pairAvailability({ room, teacher }, pairNo, target) {
+  let csvText;
+  try {
+    csvText = (await ss.fetchDayCsv(target, 5 * 60 * 1000)).csvText;
+  } catch (err) {
+    return err instanceof ss.NotPublishedError ? notPublishedText(target) : 'Не удалось получить расписание, попробуй позже.';
+  }
+  const when = `${D.fmtDM(target)} (${D.weekdayRu(target)}), пара ${pairNo}`;
+  if (teacher) {
+    const res = ss.searchSchedule(csvText, { teacher }, target);
+    const row = res.rows.find((r) => r.pair === pairNo);
+    return row
+      ? `🔴 ${teacher} на ${when}: занят — ${row.subject}${row.room ? `, ауд. ${row.room}` : ''} (${row.groupsText})`
+      : `🟢 ${teacher} на ${when}: свободен`;
+  }
+  const res = ss.freeRooms(csvText, target, pairNo);
+  const norm = (r) => String(r).replace(/\s+/g, '').toLowerCase();
+  const busy = res.busy.some((r) => norm(r) === norm(room));
+  return busy ? `🔴 Кабинет ${room} на ${when}: занят` : `🟢 Кабинет ${room} на ${when}: свободен`;
 }
 
 async function onMenuButton(interaction) {
@@ -411,7 +598,7 @@ async function onMenuButton(interaction) {
       return;
     case 'now':
       if (!s.subj) return void (await interaction.reply({ content: 'Сначала укажи группу или фамилию.' }));
-      await sendScheduleSnapshot(interaction, s.subj, D.tomorrowParts(), s.showGaps, s.format);
+      await sendScheduleSnapshot(interaction, s.subj, D.tomorrowParts(), s.showGaps, s.format, s.theme, uid);
       return;
     case 'togglesub':
       storage.setSubscribed(uid, !s.subscribed);
@@ -437,7 +624,7 @@ async function onMenuButton(interaction) {
       await interaction.update(menuView(uid));
       return;
     case 'format':
-      storage.setFormat(uid, s.format === 'text' ? 'embed' : 'text');
+      storage.setFormat(uid, menu.nextFormat(s.format));
       await interaction.update(menuView(uid));
       return;
     case 'search':
@@ -451,6 +638,9 @@ async function onMenuButton(interaction) {
       return;
     case 'ask':
       await interaction.showModal(menu.askModal());
+      return;
+    case 'help':
+      await interaction.update(menu.buildHelpView({ inMenu: true }));
       return;
     case 'refresh':
       await interaction.update(menuView(uid));
@@ -498,10 +688,14 @@ async function onScheduleButton(interaction) {
     await interaction.showModal(menu.reportModal(rest.slice('report:'.length)));
     return;
   }
+  if (rest.startsWith('note:')) {
+    await interaction.showModal(menu.noteModal(rest.slice('note:'.length)));
+    return;
+  }
   if (rest.startsWith('send:')) {
     const t = D.partsFromIso(rest.slice('send:'.length));
     if (!t || !s.subj) return;
-    await sendScheduleSnapshot(interaction, s.subj, t, s.showGaps, s.format);
+    await sendScheduleSnapshot(interaction, s.subj, t, s.showGaps, s.format, s.theme, uid);
     return;
   }
   if (rest.startsWith('share:')) {
@@ -601,6 +795,27 @@ async function onRoleButton(interaction) {
   }
 }
 
+async function onPauseButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('pause:'.length);
+
+  if (rest === 'back') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
+  if (rest === 'date') return void (await interaction.showModal(menu.pauseDateModal()));
+  if (rest === 'off') {
+    storage.setPausedUntil(uid, null);
+    log('INFO', `${uid} снял паузу`);
+    return void (await interaction.update(menu.buildPauseView(effState(uid))));
+  }
+  if (rest.startsWith('days:')) {
+    const n = Number(rest.slice('days:'.length));
+    if (!(n >= 1 && n <= 180)) return;
+    const until = D.iso(D.shiftParts(D.todayParts(), n));
+    storage.setPausedUntil(uid, until);
+    log('INFO', `${uid} поставил паузу до ${until}`);
+    return void (await interaction.update(menu.buildPauseView(effState(uid))));
+  }
+}
+
 async function onDaysButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('days:'.length);
@@ -633,6 +848,9 @@ async function onMorningButton(interaction) {
   const rest = interaction.customId.slice('mrn:'.length);
   if (rest === 'done') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
   if (rest === 'time') return void (await interaction.showModal(menu.morningTimeModal(effState(uid).morningTime)));
+  if (rest === 'greeting') {
+    return void (await interaction.showModal(menu.morningGreetingModal(effState(uid).morningGreeting)));
+  }
   if (rest === 'toggle') {
     storage.setMorning(uid, !effState(uid).morning);
     await interaction.update(menu.buildMorningView(effState(uid)));
@@ -648,6 +866,25 @@ async function onSettingsButton(interaction) {
   switch (rest) {
     case 'back':
       return void (await interaction.update(menuView(uid)));
+    case 'group': {
+      await interaction.update({ content: '⏳ Загружаю список групп…', embeds: [], components: [] });
+      let view;
+      try {
+        const list = await ss.listAllGroups();
+        groupCache.set(uid, list);
+        view = list.length
+          ? menu.buildGroupPicker(list, 0)
+          : menu.buildGroupPicker([], 0, { error: 'Сайт не отдал список групп. Введи название вручную.' });
+      } catch (err) {
+        log('WARN', `список групп: ${err.message}`);
+        view = menu.buildGroupPicker([], 0, { error: 'Не удалось загрузить список групп с сайта. Введи название вручную.' });
+      }
+      return void (await interaction.editReply(view));
+    }
+    case 'role':
+      return void (await interaction.update(menu.buildRoleView(s)));
+    case 'pause':
+      return void (await interaction.update(menu.buildPauseView(s)));
     case 'togglesub':
       storage.setSubscribed(uid, !s.subscribed);
       return void (await back());
@@ -655,7 +892,10 @@ async function onSettingsButton(interaction) {
       storage.setShowGaps(uid, !s.showGaps);
       return void (await back());
     case 'format':
-      storage.setFormat(uid, s.format === 'text' ? 'embed' : 'text');
+      storage.setFormat(uid, menu.nextFormat(s.format));
+      return void (await back());
+    case 'theme':
+      storage.setTheme(uid, menu.nextTheme(s.theme));
       return void (await back());
     case 'time':
       return void (await interaction.showModal(menu.timeModal(storage.get(uid).time)));
@@ -684,19 +924,24 @@ async function onAnswerButton(interaction) {
 
 const weekState = new Map(); // uid -> mondayIso
 
-async function renderWeek(interaction, uid, mondayParts) {
-  await interaction.update({ content: '⏳ Загружаю неделю…', embeds: [], components: [] });
-  const s = effState(uid);
+async function loadWeekDays(subj, mondayParts) {
   const days = [];
   for (let i = 0; i < 6; i++) {
     const parts = D.shiftParts(mondayParts, i);
     try {
       const { csvText } = await ss.fetchDayCsv(parts, 5 * 60 * 1000);
-      days.push({ parts, data: buildDayData(csvText, s.subj, parts, { showGaps: false }) });
+      days.push({ parts, data: buildDayData(csvText, subj, parts, { showGaps: false }) });
     } catch (err) {
       days.push({ parts, error: err instanceof ss.NotPublishedError ? 'не опубликовано' : 'ошибка' });
     }
   }
+  return days;
+}
+
+async function renderWeek(interaction, uid, mondayParts) {
+  await interaction.update({ content: '⏳ Загружаю неделю…', embeds: [], components: [] });
+  const s = effState(uid);
+  const days = await loadWeekDays(s.subj, mondayParts);
   weekState.set(uid, D.iso(mondayParts));
   await interaction.editReply(menu.buildWeekView({ days }, s.format));
 }
@@ -705,6 +950,19 @@ async function onWeekButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('wk:'.length);
   if (rest === 'menu') return void (await interaction.update(menuView(uid)));
+
+  if (rest === 'img') {
+    const s = effState(uid);
+    if (!s.subj) return void (await interaction.reply({ content: 'Сначала укажи группу или фамилию.' }));
+    await interaction.deferReply();
+    const monday = D.partsFromIso(weekState.get(uid) || '') || D.mondayOf(D.todayParts());
+    const days = await loadWeekDays(s.subj, monday);
+    const buf = render.available() ? render.renderWeekImage({ days }) : null;
+    if (buf) await interaction.editReply({ files: [{ attachment: buf, name: 'nedelya.png' }] });
+    else await interaction.editReply({ content: menu.buildWeekView({ days }, 'text').content.slice(0, 1990) });
+    return;
+  }
+
   const cur = D.partsFromIso(weekState.get(uid) || '') || D.mondayOf(D.todayParts());
   let monday;
   if (rest === 'this') monday = D.mondayOf(D.todayParts());
@@ -723,6 +981,17 @@ async function onAdminButton(interaction) {
 
   if (rest === 'menu') return void (await interaction.update(menu.buildAdminMenu()));
   if (rest === 'stats') return void (await interaction.update(menu.buildStatsView(storage.stats())));
+  if (rest === 'health') return void (await interaction.update(menu.buildHealthView(ss.health())));
+  if (rest === 'log') return void (await interaction.update(menu.buildAdminLogView(storage.getAdminLog(15))));
+  if (rest === 'schann') {
+    return void (await interaction.update(menu.buildSchedAnnView(storage.listScheduledAnnounces())));
+  }
+  if (rest === 'schann:add') return void (await interaction.showModal(menu.schedAnnModal()));
+  if (rest.startsWith('schann:del:')) {
+    const sid = rest.slice('schann:del:'.length);
+    if (storage.removeScheduledAnnounce(sid)) storage.addAdminLog(uid, `удалил отложенное объявление ${sid}`);
+    return void (await interaction.update(menu.buildSchedAnnView(storage.listScheduledAnnounces())));
+  }
   if (rest === 'admins') return void (await interaction.update(menu.buildAdminsView(storage.getAdmins(), uid)));
   if (rest === 'announce') return void (await interaction.showModal(menu.announceModal()));
   if (rest === 'addadmin') return void (await interaction.showModal(menu.addAdminModal()));
@@ -733,6 +1002,7 @@ async function onAdminButton(interaction) {
       return;
     }
     log('INFO', `${uid} удалил админа ${id}`);
+    storage.addAdminLog(uid, `удалил админа …${String(id).slice(-4)}`);
     await interaction.update(menu.buildAdminsView(storage.getAdmins(), uid));
   }
 }
@@ -807,6 +1077,24 @@ async function onModal(interaction) {
     return;
   }
 
+  if (id.startsWith('modal:note:')) {
+    const iso = id.slice('modal:note:'.length);
+    const pair = Number(interaction.fields.getTextInputValue('pair').trim());
+    if (!(pair >= 1 && pair <= 7)) return void (await interaction.reply({ content: 'Номер пары — число от 1 до 7.' }));
+    const text = interaction.fields.getTextInputValue('text').trim();
+    storage.setNote(uid, iso, pair, text || null);
+    log('INFO', `${uid} заметка ${iso}|${pair}: ${text ? 'сохранил' : 'убрал'}`);
+    const t = D.partsFromIso(iso);
+    if (t && interaction.isFromMessage && interaction.isFromMessage()) {
+      await renderSchedule(interaction, uid, t);
+    } else {
+      await interaction.reply({
+        content: text ? `📝 Заметка к ${pair}-й паре${t ? ` на ${D.fmtDM(t)}` : ''} сохранена.` : '📝 Заметка удалена.',
+      });
+    }
+    return;
+  }
+
   if (id.startsWith('modal:report:')) {
     const iso = id.slice('modal:report:'.length);
     const text = interaction.fields.getTextInputValue('text').trim();
@@ -853,10 +1141,34 @@ async function onModal(interaction) {
     return;
   }
 
+  if (id === 'modal:pausedate') {
+    const target = parseDateField(interaction.fields.getTextInputValue('date'));
+    const todayIso = D.iso(D.todayParts());
+    if (!target || D.iso(target) <= todayIso) {
+      return void (await interaction.reply({ content: 'Нужна будущая дата в формате дд.мм (например 20.09).' }));
+    }
+    const until = D.iso(target);
+    storage.setPausedUntil(uid, until);
+    log('INFO', `${uid} поставил паузу до ${until}`);
+    const view = menu.buildPauseView(effState(uid));
+    if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+    else await interaction.reply(view);
+    return;
+  }
+
   if (id === 'modal:morningtime') {
     const hhmm = D.parseHHMM(interaction.fields.getTextInputValue('time'));
     if (!hhmm) return void (await interaction.reply({ content: 'Неверный формат. Нужно ЧЧ:ММ, например 07:30.' }));
     storage.setMorningTime(uid, hhmm);
+    const view = menu.buildMorningView(effState(uid));
+    if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+    else await interaction.reply(view);
+    return;
+  }
+
+  if (id === 'modal:morninggreeting') {
+    const text = interaction.fields.getTextInputValue('text').trim();
+    storage.setMorningGreeting(uid, text || null);
     const view = menu.buildMorningView(effState(uid));
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
     else await interaction.reply(view);
@@ -903,26 +1215,51 @@ async function onModal(interaction) {
     if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.' }));
     const text = interaction.fields.getTextInputValue('text').trim();
     if (!text) return void (await interaction.reply({ content: 'Пустой текст.' }));
-    const subs = storage.subscribers();
-    await interaction.reply({ content: `Рассылаю объявление ${subs.length} подписчикам…` });
-    let ok = 0;
-    let fail = 0;
-    for (const u of subs) {
-      try {
-        const user = await client.users.fetch(u.userId);
-        await user.send({ content: `📢 **Объявление**\n\n${text}` });
-        ok += 1;
-      } catch {
-        fail += 1;
-      }
-      await new Promise((r) => setTimeout(r, 900));
-    }
-    log('INFO', `объявление от ${uid}: доставлено ${ok}, не доставлено ${fail}`);
+    const group = interaction.fields.getTextInputValue('group').trim();
+    await interaction.reply({ content: `Рассылаю объявление${group ? ` группе ${group}` : ' всем подписчикам'}…` });
+    const { ok, fail, total } = await broadcastAnnouncement(text, group);
+    log('INFO', `объявление от ${uid}${group ? ` (${group})` : ''}: доставлено ${ok}/${total}`);
+    storage.addAdminLog(uid, `объявление ${group ? `группе ${group}` : 'всем'} (${ok}/${total})`);
     try {
-      await interaction.followUp({ content: `Готово: доставлено ${ok}, не доставлено ${fail}.` });
+      await interaction.followUp({ content: `Готово: доставлено ${ok} из ${total}, не доставлено ${fail}.` });
     } catch {
       /* ignore */
     }
+    return;
+  }
+
+  if (id === 'modal:schann') {
+    if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.' }));
+    const text = interaction.fields.getTextInputValue('text').trim();
+    const whenRaw = interaction.fields.getTextInputValue('when').trim();
+    const group = interaction.fields.getTextInputValue('group').trim();
+    if (!text) return void (await interaction.reply({ content: 'Пустой текст.' }));
+    const m = /^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s+(\d{1,2}):(\d{2})$/.exec(whenRaw);
+    if (!m) return void (await interaction.reply({ content: 'Когда: «дд.мм ЧЧ:ММ», например 12.09 08:00.' }));
+    const dd = +m[1];
+    const mm = +m[2];
+    const hh = +m[4];
+    const mi = +m[5];
+    if (mm < 1 || mm > 12 || dd < 1 || dd > 31 || hh > 23 || mi > 59) {
+      return void (await interaction.reply({ content: 'Неверная дата или время.' }));
+    }
+    const nowY = D.todayParts().y;
+    let atParts = D.partsFromIso(`${m[3] ? +m[3] : nowY}-${D.pad(mm)}-${D.pad(dd)}`);
+    if (!atParts) return void (await interaction.reply({ content: 'Неверная дата.' }));
+    const nowIso = D.iso(D.todayParts());
+    if (!m[3] && D.iso(atParts) < nowIso) atParts = D.partsFromIso(`${nowY + 1}-${D.pad(mm)}-${D.pad(dd)}`);
+    const atIso = D.iso(atParts);
+    const atHHMM = `${D.pad(hh)}:${D.pad(mi)}`;
+    const nn = D.tzNow();
+    if (atIso < nowIso || (atIso === nowIso && atHHMM <= `${D.pad(nn.h)}:${D.pad(nn.mi)}`)) {
+      return void (await interaction.reply({ content: 'Это время уже прошло.' }));
+    }
+    const sid = storage.addScheduledAnnounce({ text, atIso, atHHMM, group: group || null, by: uid });
+    storage.addAdminLog(uid, `запланировал объявление ${sid} на ${atIso} ${atHHMM}${group ? ` (${group})` : ''}`);
+    log('INFO', `${uid} запланировал объявление ${sid} на ${atIso} ${atHHMM}`);
+    const view = menu.buildSchedAnnView(storage.listScheduledAnnounces());
+    if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+    else await interaction.reply(view);
     return;
   }
 
@@ -932,11 +1269,34 @@ async function onModal(interaction) {
     if (!/^\d{15,20}$/.test(newId)) return void (await interaction.reply({ content: 'Это не похоже на Discord ID.' }));
     const added = storage.addAdmin(newId);
     log('INFO', `${uid} добавил админа ${newId} (${added ? 'ok' : 'уже был'})`);
+    if (added) storage.addAdminLog(uid, `добавил админа …${newId.slice(-4)}`);
     const view = menu.buildAdminsView(storage.getAdmins(), uid);
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
     else await interaction.reply(view);
     return;
   }
+}
+
+/** Разослать объявление подписчикам (всем или одной группе). */
+async function broadcastAnnouncement(text, group) {
+  const wantG = group ? ss.normGroup(group) : null;
+  const subs = storage.subscribers().filter((u) => {
+    if (!wantG) return true;
+    return u.group && u.role !== 'teacher' && ss.normGroup(u.group) === wantG;
+  });
+  let ok = 0;
+  let fail = 0;
+  for (const u of subs) {
+    try {
+      const user = await client.users.fetch(u.userId);
+      await user.send({ content: `📢 **Объявление**\n\n${text}` });
+      ok += 1;
+    } catch {
+      fail += 1;
+    }
+    await new Promise((r) => setTimeout(r, 900));
+  }
+  return { ok, fail, total: subs.length };
 }
 
 async function relayToAdmin(interaction, uid, topic, body) {
@@ -974,10 +1334,54 @@ function startSchedulers() {
   setInterval(broadcastTick, 60 * 1000);
   setInterval(morningTick, 60 * 1000);
   setInterval(reminderTick, 60 * 1000);
+  setInterval(announceTick, 60 * 1000);
   setInterval(changeTick, 15 * 60 * 1000);
   setInterval(warmTick, 5 * 60 * 1000);
+  setInterval(healthTick, 15 * 60 * 1000);
+  setInterval(pauseReminderTick, 60 * 60 * 1000);
   broadcastTick();
   warmTick();
+}
+
+/** «Пауза заканчивается завтра» — раз в час. */
+async function pauseReminderTick() {
+  const tomIso = D.iso(D.tomorrowParts());
+  for (const u of storage.subscribers()) {
+    if (u.pausedUntil !== tomIso || u.pauseEndNotified === tomIso) continue;
+    try {
+      const user = await client.users.fetch(u.userId);
+      await user.send({
+        content: `⏸ Пауза заканчивается завтра (${D.fmtDM(D.tomorrowParts())}) — рассылка, утро и напоминания снова включатся.`,
+      });
+    } catch (err) {
+      if (!(err && err.code === 50007)) log('WARN', `пауза-напоминание ${u.userId}: ${err.message || err}`);
+    }
+    storage.setPauseEndNotified(u.userId, tomIso);
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+/** Отложенные объявления администраторов. */
+async function announceTick() {
+  const now = D.tzNow();
+  const nowIso = D.iso(D.todayParts());
+  const nowHHMM = `${D.pad(now.h)}:${D.pad(now.mi)}`;
+  const due = storage.dueScheduledAnnounces(nowIso, nowHHMM);
+  if (!due.length) return;
+  for (const a of due) {
+    storage.removeScheduledAnnounce(a.id);
+    const { ok, fail, total } = await broadcastAnnouncement(a.text, a.group);
+    log('INFO', `отложенное объявление ${a.id}: доставлено ${ok}/${total}, не доставлено ${fail}`);
+    storage.addAdminLog(a.by || 'система', `отложенное объявление ${a.id} отправлено (${ok}/${total})`);
+    if (a.by) {
+      try {
+        const admin = await client.users.fetch(a.by);
+        await admin.send({ content: `✅ Отложенное объявление ${a.id} отправлено: доставлено ${ok} из ${total}.` });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 /** Держит кэш CSV на сегодня/завтра тёплым — чтобы «следующая пара» в /start была без задержки. */
@@ -999,6 +1403,7 @@ async function morningTick() {
 
   const due = storage.subscribers().filter((u) => {
     if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
+    if (isPaused(u.pausedUntil)) return false;
     const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
     if (!days.includes(dow)) return false;
     return u.morningLastSent !== todayIso;
@@ -1012,10 +1417,20 @@ async function morningTick() {
     /* нет данных — всё равно поздороваемся */
   }
 
+  let weatherLine = null;
+  if (cfg.weatherEnabled) {
+    try {
+      weatherLine = await weather.morningLine();
+    } catch {
+      /* без погоды — не беда */
+    }
+  }
+
   const cache = new Map();
   for (const u of due) {
     const subj = subjOf(u);
-    let body = '☀️ Доброе утро!';
+    const greet = u.morningGreeting || '☀️ Доброе утро!';
+    let body = greet;
     if (subj && csvText) {
       const sk = subjKey(subj);
       if (!cache.has(sk)) {
@@ -1032,12 +1447,14 @@ async function morningTick() {
           const n = lessons.length;
           const w = n % 10 === 1 && n % 100 !== 11 ? 'пара' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'пары' : 'пар';
           const ep = D.epochAt(today, lessons[0].start);
-          body = `☀️ Доброе утро! Сегодня ${n} ${w}, первая в ${lessons[0].start}${ep ? ` (<t:${ep}:R>)` : ''}, до ${lessons[lessons.length - 1].end}.`;
+          body = `${greet} Сегодня ${n} ${w}, первая в ${lessons[0].start}${ep ? ` (<t:${ep}:R>)` : ''}, до ${lessons[lessons.length - 1].end}.`;
         } else {
-          body = D.weekdayIso(today) >= 6 ? '☀️ Доброе утро! Сегодня выходной — пар нет 🎉' : '☀️ Доброе утро! Сегодня пар нет.';
+          body = D.weekdayIso(today) >= 6 ? `${greet} Сегодня выходной — пар нет 🎉` : `${greet} Сегодня пар нет.`;
         }
       }
     }
+    if (weatherLine) body += `\n${weatherLine}`;
+
     try {
       const user = await client.users.fetch(u.userId);
       await user.send({ content: body });
@@ -1053,13 +1470,21 @@ async function morningTick() {
 async function broadcastTick() {
   if (broadcasting) return;
   const now = D.tzNow();
-  const hhmm = `${D.pad(now.h)}:${D.pad(now.mi)}`;
+  const nowMin = now.h * 60 + now.mi;
   const target = D.tomorrowParts();
   const targetIso = D.iso(target);
   const dow = D.weekdayIso(target);
 
+  // «Просрочен» = наступило время рассылки, а расписание на завтра ещё не отправлено.
+  // Если расписания на сайте пока нет — runBroadcast не помечает отправку, и на
+  // следующих минутах попытка повторяется, пока расписание не появится.
+  storage.purgeExpiredPauses(D.iso(D.todayParts()));
+  storage.purgeOldNotes(D.iso(D.todayParts()));
+
   const due = storage.subscribers().filter((u) => {
-    if ((u.time || cfg.defaultTime) !== hhmm) return false;
+    if (isPaused(u.pausedUntil)) return false;
+    const [th, tm] = String(u.time || cfg.defaultTime).split(':').map(Number);
+    if (nowMin < th * 60 + tm) return false;
     const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
     if (!days.includes(dow)) return false;
     return u.lastSent !== targetIso;
@@ -1096,23 +1521,35 @@ async function runBroadcast(due, target, targetIso) {
     }
   }
 
+  const weekendTomorrow = D.weekdayIso(target) >= 6;
+
+  // Ничего не отправляем и НЕ помечаем lastSent — тик через минуту повторит попытку.
+  // Как только расписание появится на сайте, оно уйдёт подписчикам.
+  if (sourceFailed) {
+    log('INFO', 'рассылка отложена: источник временно недоступен, повтор позже');
+    return;
+  }
+  if (notPublished && !weekendTomorrow) {
+    log('INFO', `рассылка отложена: расписание на ${targetIso} ещё не опубликовано, повтор позже`);
+    return;
+  }
+  if (!notPublished && !csvText) {
+    log('WARN', 'рассылка отложена: пустой ответ источника, повтор позже');
+    return;
+  }
+
   const dataCache = new Map(); // groupNorm|showGaps -> scheduleData
   const digestSaved = new Set();
   let sent = 0;
   let skipped = 0;
-
-  const weekendTomorrow = D.weekdayIso(target) >= 6;
+  let deferredCount = 0;
 
   for (const u of due) {
     let payload;
     if (notPublished) {
-      payload = {
-        content: weekendTomorrow
-          ? `Завтра ${ss.weekdayRu(target)} — расписания нет, отдыхаем 🎉`
-          : notPublishedText(target),
-      };
-    } else if (sourceFailed || !csvText) payload = { content: 'Не удалось получить расписание, попробую позже.' };
-    else {
+      // сюда попадаем только если завтра выходной — по-доброму сообщаем и закрываем день
+      payload = { content: `Завтра ${ss.weekdayRu(target)} — расписания нет, отдыхаем 🎉` };
+    } else {
       const subj = subjOf(u);
       const sk = subjKey(subj);
       const key = `${sk}|${u.showGaps ? 1 : 0}`;
@@ -1125,19 +1562,21 @@ async function runBroadcast(due, target, targetIso) {
         }
       }
       const data = dataCache.get(key);
-      if (!data) payload = { content: 'Не удалось получить расписание, попробую позже.' };
-      else if (data.note === 'no-lessons') {
+      if (!data) {
+        // разбор не удался — не помечаем отправку, повторим на следующем тике
+        deferredCount += 1;
+        continue;
+      }
+      if (data.note === 'no-lessons') {
         payload = {
-          content: weekendTomorrow
-            ? '🎉 Завтра выходной — пар нет, отдыхай!'
-            : '📭 Завтра пар нет.',
+          content: weekendTomorrow ? '🎉 Завтра выходной — пар нет, отдыхай!' : '📭 Завтра пар нет.',
         };
       } else {
-        payload = menu.scheduleMessage(data, humanUrl, u.format);
+        payload = menu.scheduleMessage(attachNotes(data, u.userId, targetIso), humanUrl, u.format, u.theme);
         if (!digestSaved.has(sk)) {
           try {
             const canon = buildDayData(csvText, subj, target, {});
-            storage.setDigest(`${sk}|${targetIso}`, ss.scheduleHash(canon), targetIso);
+            storage.setDigest(`${sk}|${targetIso}`, ss.scheduleHash(canon), targetIso, ss.rowsSnapshot(canon));
           } catch {
             /* ignore */
           }
@@ -1162,7 +1601,7 @@ async function runBroadcast(due, target, targetIso) {
     }
     await new Promise((r) => setTimeout(r, 1200));
   }
-  log('INFO', `рассылка завершена: отправлено ${sent}, пропущено ${skipped}`);
+  log('INFO', `рассылка завершена: отправлено ${sent}, пропущено ${skipped}, отложено ${deferredCount}`);
 }
 
 // -------- напоминания за N минут до пары (проверка раз в минуту) --------
@@ -1170,7 +1609,7 @@ async function runBroadcast(due, target, targetIso) {
 const remindersSent = new Set(); // `${uid}|${iso}|${startMin}`
 
 async function reminderTick() {
-  const users = storage.subscribers().filter((u) => u.reminderMinutes > 0);
+  const users = storage.subscribers().filter((u) => u.reminderMinutes > 0 && !isPaused(u.pausedUntil));
   if (!users.length) return;
   const today = D.todayParts();
   const todayIso = D.iso(today);
@@ -1212,8 +1651,9 @@ async function reminderTick() {
         const user = await client.users.fetch(u.userId);
         const where = r.room ? `, ауд. ${r.room}` : '';
         const who = subj.kind === 'teacher' && r.groupsText ? ` — ${r.groupsText}` : '';
+        const note = r.pair != null ? storage.getNotesForDay(u.userId, todayIso)[r.pair] : null;
         await user.send({
-          content: `⏰ Через ${u.reminderMinutes} мин пара: **${r.subject}**${where}${who} (в ${r.start})`,
+          content: `⏰ Через ${u.reminderMinutes} мин пара: **${r.subject}**${where}${who} (в ${r.start})${note ? `\n📝 ${note}` : ''}`,
         });
       } catch (err) {
         if (!(err && err.code === 50007)) log('WARN', `напоминание ${u.userId}: ${err.message || err}`);
@@ -1237,6 +1677,7 @@ async function changeTick() {
     const target = D.partsFromIso(iso);
     if (!target) continue;
     const affected = subs.filter((u) => {
+      if (isPaused(u.pausedUntil)) return false;
       const subj = subjOf(u);
       return subj && subjKey(subj) === sk && u.lastSent === iso;
     });
@@ -1259,21 +1700,85 @@ async function changeTick() {
     }
     const hash = ss.scheduleHash(canon);
     if (hash === storage.getDigest(key)) continue;
-    storage.setDigest(key, hash, iso);
+
+    const oldSnap = storage.getDigestSnapshot(key);
+    const newSnap = ss.rowsSnapshot(canon);
+    let summaryText = null;
+    if (Array.isArray(oldSnap) && oldSnap.length) {
+      const diff = ss.diffRows(oldSnap, newSnap);
+      if (diff.added.length || diff.removed.length || diff.changed.length) {
+        summaryText = menu.changeSummaryText(target, diff);
+      }
+    }
+    storage.setDigest(key, hash, iso, newSnap);
     log('INFO', `расписание изменилось: ${sk} на ${iso}, уведомляю ${affected.length}`);
 
+    const header = summaryText || `⚠️ Расписание на ${D.fmtDM(target)} обновилось:`;
     for (const u of affected) {
       try {
         const data = buildDayData(csvText, subjOf(u), target, { showGaps: u.showGaps });
-        const body = menu.scheduleMessage(data, humanUrl, u.format);
+        const body = menu.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, u.format, u.theme);
         const user = await client.users.fetch(u.userId);
-        await user.send({ content: `⚠️ Расписание на ${D.fmtDM(target)} обновилось:` });
+        await user.send({ content: header });
         await user.send(body);
       } catch (err) {
         if (!(err && err.code === 50007)) log('WARN', `уведомление об изменении ${u.userId}: ${err.message || err}`);
       }
       await new Promise((r) => setTimeout(r, 800));
     }
+  }
+}
+
+// -------- авто-алерт админам: источник расписания не грузится --------
+
+const PROCESS_START = Date.now();
+const healthAlert = { notifiedBroken: false, lastNotifiedAt: 0 };
+
+async function notifyAdmins(text) {
+  for (const id of storage.getAdmins()) {
+    try {
+      const admin = await client.users.fetch(id);
+      await admin.send({ content: text });
+    } catch (err) {
+      if (!(err && err.code === 50007)) log('WARN', `health-алерт ${id}: ${err.message || err}`);
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+async function healthTick() {
+  if (!cfg.healthAlertEnabled || !storage.getAdmins().length) return;
+
+  const now = D.tzNow();
+  const studyTime = now.h >= 7 && now.h < 20 && D.weekdayIso(D.todayParts()) <= 5;
+
+  // Свежая проба, чтобы health отражал текущее состояние даже без подписчиков.
+  await ss.fetchDayCsv(D.todayParts(), 5 * 60 * 1000).catch(() => {});
+  const h = ss.health();
+
+  const staleMs = Date.now() - (h.lastOkAt || PROCESS_START);
+  const broken = staleMs > cfg.healthAlertHours * 60 * 60 * 1000;
+
+  if (broken && studyTime) {
+    const COOLDOWN = 6 * 60 * 60 * 1000;
+    if (Date.now() - healthAlert.lastNotifiedAt < COOLDOWN) return;
+    healthAlert.lastNotifiedAt = Date.now();
+    healthAlert.notifiedBroken = true;
+    const hoursAgo = h.lastOkAt ? Math.round(staleMs / (60 * 60 * 1000)) : null;
+    const text =
+      '🔴 **Источник расписания не отвечает**\n' +
+      (h.lastOkAt
+        ? `Последняя успешная загрузка ~${hoursAgo} ч назад (<t:${Math.floor(h.lastOkAt / 1000)}:R>).\n`
+        : 'С момента запуска бота ни одной успешной загрузки.\n') +
+      (h.lastErrMsg ? `Ошибка: \`${String(h.lastErrMsg).slice(0, 300)}\`\n` : '') +
+      'Проверь koopteh10.ru и доступ к Google-таблицам. Рассылка сама возобновится, как только источник заработает.';
+    await notifyAdmins(text);
+    log('WARN', `health-алерт отправлен админам (простой ${Math.round(staleMs / 60000)} мин)`);
+  } else if (!broken && healthAlert.notifiedBroken && h.lastOkAt) {
+    healthAlert.notifiedBroken = false;
+    healthAlert.lastNotifiedAt = 0;
+    await notifyAdmins(`🟢 **Источник расписания снова доступен.** Загрузка выполнена <t:${Math.floor(h.lastOkAt / 1000)}:R>.`);
+    log('INFO', 'health восстановлен — уведомил админов');
   }
 }
 

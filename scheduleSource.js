@@ -596,6 +596,69 @@ async function listAllTeachers({ maxAgeMs = 60 * 60 * 1000 } = {}) {
   return list;
 }
 
+// ---- Список кабинетов (для автодополнения /поиск). Кэш на 1 час. ----
+
+let _roomsCache = { at: 0, list: [] };
+
+async function listAllRooms({ maxAgeMs = 60 * 60 * 1000 } = {}) {
+  if (_roomsCache.list.length && Date.now() - _roomsCache.at < maxAgeMs) return _roomsCache.list;
+  const url = await resolveLatestSheetUrl(cfg.calendarUrl);
+  const csv = await downloadCsv(url);
+  const blocks = parseBlocks(parseCsv(stripBom(String(csv))));
+  const seen = new Set();
+  for (const b of blocks) {
+    for (const row of b.rows) {
+      for (let i = 2; i < row.length; i++) {
+        const cell = (row[i] || '').trim();
+        if (!cell) continue;
+        const room = parseLesson(cell).room.trim();
+        if (room) seen.add(room);
+      }
+    }
+  }
+  const list = [...seen].sort((a, b) => (roomNum(a) - roomNum(b)) || a.localeCompare(b, 'ru'));
+  if (list.length) _roomsCache = { at: Date.now(), list };
+  return list;
+}
+
+// ---- Преподаватели с предметами («кто что ведёт»). Кэш на 1 час. ----
+
+let _tsCache = { at: 0, list: [] };
+
+async function listTeachersWithSubjects({ maxAgeMs = 60 * 60 * 1000 } = {}) {
+  if (_tsCache.list.length && Date.now() - _tsCache.at < maxAgeMs) return _tsCache.list;
+  const url = await resolveLatestSheetUrl(cfg.calendarUrl);
+  const csv = await downloadCsv(url);
+  const blocks = parseBlocks(parseCsv(stripBom(String(csv))));
+  const seen = new Map(); // normName -> { teacher, subjects:Set }
+  for (const b of blocks) {
+    for (const row of b.rows) {
+      for (let i = 2; i < row.length; i++) {
+        const cell = (row[i] || '').trim();
+        if (!cell) continue;
+        const p = parseLesson(cell);
+        if (!p.teacher || !p.subject) continue;
+        const k = normName(p.teacher.split(' ')[0]);
+        if (!k) continue;
+        if (!seen.has(k)) seen.set(k, { teacher: p.teacher, subjects: new Set() });
+        seen.get(k).subjects.add(p.subject.replace(/\s+/g, ' ').trim());
+      }
+    }
+  }
+  const list = [...seen.values()]
+    .map((x) => ({ teacher: x.teacher, subjects: [...x.subjects].sort((a, b) => a.localeCompare(b, 'ru')) }))
+    .sort((a, b) => a.teacher.localeCompare(b.teacher, 'ru'));
+  if (list.length) _tsCache = { at: Date.now(), list };
+  return list;
+}
+
+/** Нестрогое совпадение предмета с запросом (подстрока, ё→е, регистр). */
+function subjectMatches(subject, query) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+  const q = norm(query);
+  return q.length > 0 && norm(subject).includes(q);
+}
+
 // ---- Поиск по кабинету и/или преподавателю за день -------------------
 
 function searchSchedule(csvText, { room = '', teacher = '' }, target) {
@@ -688,6 +751,41 @@ function scheduleHash(data) {
   return crypto.createHash('sha1').update(scheduleText(data)).digest('hex');
 }
 
+/** Компактный снимок пар для дифа «что изменилось» (кладётся в digest). */
+function rowsSnapshot(data) {
+  return (data.rows || []).map((r) => ({
+    pair: r.pair ?? null,
+    start: r.start || '',
+    end: r.end || '',
+    subject: String(r.subject || '').replace(/^🔔\s*/, ''),
+    room: r.room || '',
+    who: r.groupsText || r.teacher || '',
+  }));
+}
+
+/**
+ * Разница между старым и новым снимком пар.
+ * @returns {{ added: Array, removed: Array, changed: Array<{from,to}> }}
+ */
+function diffRows(oldRows, newRows) {
+  const keyOf = (r) => (r.pair != null ? `p${r.pair}` : `t${r.start || '?'}`);
+  const oldMap = new Map((oldRows || []).map((r) => [keyOf(r), r]));
+  const newMap = new Map((newRows || []).map((r) => [keyOf(r), r]));
+  const same = (a, b) =>
+    a.start === b.start && a.end === b.end && a.subject === b.subject && a.room === b.room && a.who === b.who;
+
+  const added = [];
+  const removed = [];
+  const changed = [];
+  for (const [k, nr] of newMap) {
+    const or = oldMap.get(k);
+    if (!or) added.push(nr);
+    else if (!same(or, nr)) changed.push({ from: or, to: nr });
+  }
+  for (const [k, or] of oldMap) if (!newMap.has(k)) removed.push(or);
+  return { added, removed, changed };
+}
+
 /** Человекочитаемая ссылка на таблицу-источник (для проверки пользователем). */
 function humanSheetUrl(anyUrl) {
   const m = /\/spreadsheets\/d\/(?:e\/)?([a-zA-Z0-9_-]+)/.exec(anyUrl || '');
@@ -703,18 +801,42 @@ function peekCachedDay(target) {
   return hit ? hit.csvText : null;
 }
 
+// Диагностика источника (для /admin → «Состояние источника»).
+const _health = {
+  lastOkAt: 0,
+  lastOkIso: null,
+  lastTryAt: 0,
+  lastErrAt: 0,
+  lastErrMsg: null,
+  lastErrKind: null,
+};
+const health = () => ({ ..._health });
+
 async function fetchDayCsv(target, maxAgeMs = 0) {
   const key = D.iso(target);
   const hit = _csvCache.get(key);
   if (hit && maxAgeMs > 0 && Date.now() - hit.at < maxAgeMs) return hit;
-  const url = await resolveSheetUrl(cfg.calendarUrl, target);
-  const csvText = await downloadCsv(url);
-  const rec = { at: Date.now(), csvText, humanUrl: humanSheetUrl(url) };
-  _csvCache.set(key, rec);
-  if (_csvCache.size > 40) {
-    for (const k of [..._csvCache.keys()].slice(0, 15)) _csvCache.delete(k);
+  _health.lastTryAt = Date.now();
+  try {
+    const url = await resolveSheetUrl(cfg.calendarUrl, target);
+    const csvText = await downloadCsv(url);
+    const rec = { at: Date.now(), csvText, humanUrl: humanSheetUrl(url) };
+    _csvCache.set(key, rec);
+    if (_csvCache.size > 40) {
+      for (const k of [..._csvCache.keys()].slice(0, 15)) _csvCache.delete(k);
+    }
+    _health.lastOkAt = Date.now();
+    _health.lastOkIso = key;
+    _health.lastErrAt = 0;
+    _health.lastErrMsg = null;
+    _health.lastErrKind = null;
+    return rec;
+  } catch (err) {
+    _health.lastErrAt = Date.now();
+    _health.lastErrMsg = err && err.message ? err.message : String(err);
+    _health.lastErrKind = err instanceof NotPublishedError ? 'not-published' : 'unavailable';
+    throw err;
   }
-  return rec;
 }
 
 /**
@@ -774,6 +896,7 @@ module.exports = {
   getSchedule,
   getScheduleText,
   fetchDayCsv,
+  health,
   peekCachedDay,
   resolveSheetUrl,
   resolveLatestSheetUrl,
@@ -785,8 +908,13 @@ module.exports = {
   freeRooms,
   scheduleText,
   scheduleHash,
+  rowsSnapshot,
+  diffRows,
   listAllGroups,
   listAllTeachers,
+  listAllRooms,
+  listTeachersWithSubjects,
+  subjectMatches,
   bellTime,
   subjectIcon,
   BELL_WEEKDAY,

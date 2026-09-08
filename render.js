@@ -150,4 +150,70 @@ function renderScheduleImage(data) {
   return cv.toBuffer('image/png');
 }
 
-module.exports = { available, renderScheduleImage };
+const WDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+/** @returns {Buffer|null} PNG обзора недели (сетка 3×2) или null. */
+function renderWeekImage(week) {
+  if (!canvas || !week || !Array.isArray(week.days) || !week.days.length) return null;
+  const days = week.days;
+  const cols = 3;
+  const rowsN = Math.ceil(days.length / cols);
+  const W = 1080;
+  const pad = 24;
+  const gap = 16;
+  const cellW = (W - pad * 2 - gap * (cols - 1)) / cols;
+  const headH = 68;
+  const lineH = 22;
+  const maxLines = 9;
+  const cellH = 44 + maxLines * lineH;
+  const H = headH + pad + rowsN * cellH + (rowsN - 1) * gap + pad;
+
+  const cv = canvas.createCanvas(W, H);
+  const ctx = cv.getContext('2d');
+  const F = FONT;
+  ctx.fillStyle = CL.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const label = days.map((d) => d.data && (d.data.group || d.data.teacher)).find(Boolean) || '';
+  const mon = days[0].parts;
+  const sat = days[days.length - 1].parts;
+  ctx.fillStyle = CL.weekday;
+  ctx.fillRect(0, 0, W, headH);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `700 24px ${F}`;
+  ctx.fillText(`Неделя ${D.fmtDM(mon)} - ${D.fmtDM(sat)}${label ? `   ${label}` : ''}`, pad, 43);
+
+  days.forEach((d, i) => {
+    const cx = pad + (i % cols) * (cellW + gap);
+    const cy = headH + pad + Math.floor(i / cols) * (cellH + gap);
+    ctx.fillStyle = CL.card;
+    roundRect(ctx, cx, cy, cellW, cellH, 12);
+    ctx.fill();
+
+    ctx.fillStyle = CL.accent;
+    ctx.font = `700 15px ${F}`;
+    ctx.fillText(`${WDAYS[D.weekdayIso(d.parts) - 1]} ${D.fmtDM(d.parts)}`, cx + 14, cy + 26);
+
+    ctx.font = `400 13px ${F}`;
+    let ly = cy + 50;
+    const put = (txt, dim) => {
+      ctx.fillStyle = dim ? CL.dim : CL.text;
+      ctx.fillText(fit(ctx, txt, cellW - 26), cx + 14, ly);
+      ly += lineH;
+    };
+    if (d.error) return void put(d.error, true);
+    const data = d.data;
+    if (!data || data.note === 'not-found') return void put('нет группы', true);
+    if (data.note === 'no-lessons' || !data.rows.length) {
+      return void put(data.weekend ? 'выходной' : 'пар нет', true);
+    }
+    for (const r of data.rows.filter((x) => x.kind !== 'free').slice(0, maxLines)) {
+      const t = (r.start || '-').slice(0, 5);
+      put(`${r.pair != null ? `${r.pair}· ` : ''}${t}  ${String(r.subject).replace(/^🔔\s*/, '')}`);
+    }
+  });
+
+  return cv.toBuffer('image/png');
+}
+
+module.exports = { available, renderScheduleImage, renderWeekImage };

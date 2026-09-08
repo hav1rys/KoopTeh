@@ -27,8 +27,7 @@ function load() {
         /* ignore */
       }
     }
-    data = { users: {}, questions: {}, digests: {} };
-    return;
+    raw = null;
   }
   const isObj = (v) => v && typeof v === 'object';
   if (isObj(raw) && isObj(raw.users)) {
@@ -37,12 +36,16 @@ function load() {
       questions: isObj(raw.questions) ? raw.questions : {},
       digests: isObj(raw.digests) ? raw.digests : {},
       admins: Array.isArray(raw.admins) ? raw.admins.map(String) : [],
+      scheduledAnnouncements: Array.isArray(raw.scheduledAnnouncements) ? raw.scheduledAnnouncements : [],
+      adminLog: Array.isArray(raw.adminLog) ? raw.adminLog : [],
     };
   } else if (isObj(raw)) {
     data = { users: raw, questions: {}, digests: {}, admins: [] };
   } else {
     data = { users: {}, questions: {}, digests: {}, admins: [] };
   }
+  if (!Array.isArray(data.scheduledAnnouncements)) data.scheduledAnnouncements = [];
+  if (!Array.isArray(data.adminLog)) data.adminLog = [];
   if (!data.admins.length && cfg.adminId) data.admins = [String(cfg.adminId)];
 }
 
@@ -67,11 +70,15 @@ function get(userId) {
     time: r.time || null,
     days: Array.isArray(r.days) ? r.days : null,
     showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
-    format: r.format === 'text' ? 'text' : 'embed',
+    format: r.format === 'text' || r.format === 'image' ? r.format : 'embed',
     reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
     morning: Boolean(r.morning),
     morningTime: r.morningTime || '07:30',
+    morningGreeting: r.morningGreeting || null,
     morningLastSent: r.morningLastSent || null,
+    pausedUntil: r.pausedUntil || null,
+    pauseEndNotified: r.pauseEndNotified || null,
+    theme: r.theme || 'default',
     lastSent: r.lastSent || null,
   };
 }
@@ -122,7 +129,7 @@ function setShowGaps(userId, value) {
 }
 
 function setFormat(userId, format) {
-  rec(userId).format = format === 'text' ? 'text' : 'embed';
+  rec(userId).format = format === 'text' || format === 'image' ? format : 'embed';
   save();
 }
 
@@ -147,6 +154,87 @@ function setMorningLastSent(userId, iso) {
   save();
 }
 
+function setMorningGreeting(userId, text) {
+  const r = rec(userId);
+  if (text) r.morningGreeting = String(text).slice(0, 200);
+  else delete r.morningGreeting;
+  save();
+}
+
+function setTheme(userId, theme) {
+  rec(userId).theme = theme || 'default';
+  save();
+}
+
+/** Пауза подписки: до дня iso (в этот день рассылка возобновляется). null — снять. */
+function setPausedUntil(userId, iso) {
+  const r = rec(userId);
+  if (iso) r.pausedUntil = iso;
+  else delete r.pausedUntil;
+  delete r.pauseEndNotified;
+  save();
+}
+
+function setPauseEndNotified(userId, iso) {
+  const r = rec(userId);
+  if (iso) r.pauseEndNotified = iso;
+  else delete r.pauseEndNotified;
+  save();
+}
+
+/** Убрать истёкшие паузы (день возвращения наступил). */
+function purgeExpiredPauses(todayIso) {
+  let changed = false;
+  for (const r of Object.values(data.users)) {
+    if (r && r.pausedUntil && r.pausedUntil <= todayIso) {
+      delete r.pausedUntil;
+      delete r.pauseEndNotified;
+      changed = true;
+    }
+  }
+  if (changed) save();
+}
+
+// ---- заметки к парам ({ "<iso>|<pair>": "текст" }) --------------
+
+function getNotesForDay(userId, iso) {
+  const all = (data.users[userId] || {}).notes || {};
+  const out = {};
+  for (const [k, v] of Object.entries(all)) {
+    const [d, p] = k.split('|');
+    if (d === iso && v) out[p] = v;
+  }
+  return out;
+}
+
+function setNote(userId, iso, pair, text) {
+  const r = rec(userId);
+  if (!r.notes || typeof r.notes !== 'object') r.notes = {};
+  const key = `${iso}|${pair}`;
+  if (text) r.notes[key] = String(text).slice(0, 200);
+  else delete r.notes[key];
+  if (!Object.keys(r.notes).length) delete r.notes;
+  save();
+}
+
+function purgeOldNotes(todayIso) {
+  let changed = false;
+  for (const r of Object.values(data.users)) {
+    if (!r || !r.notes) continue;
+    for (const k of Object.keys(r.notes)) {
+      if ((k.split('|')[0] || '') < todayIso) {
+        delete r.notes[k];
+        changed = true;
+      }
+    }
+    if (!Object.keys(r.notes).length) {
+      delete r.notes;
+      changed = true;
+    }
+  }
+  if (changed) save();
+}
+
 function setLastSent(userId, iso) {
   rec(userId).lastSent = iso;
   save();
@@ -163,11 +251,15 @@ function subscribers() {
       time: r.time || null,
       days: Array.isArray(r.days) ? r.days : null,
       showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
-      format: r.format === 'text' ? 'text' : 'embed',
+      format: r.format === 'text' || r.format === 'image' ? r.format : 'embed',
       reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
       morning: Boolean(r.morning),
       morningTime: r.morningTime || '07:30',
+      morningGreeting: r.morningGreeting || null,
       morningLastSent: r.morningLastSent || null,
+      pausedUntil: r.pausedUntil || null,
+      pauseEndNotified: r.pauseEndNotified || null,
+      theme: r.theme || 'default',
       lastSent: r.lastSent || null,
     }));
 }
@@ -193,9 +285,16 @@ function deleteQuestion(qid) {
 // ---- отпечатки расписания (отслеживание изменений) --------------
 
 const getDigest = (key) => (data.digests[key] ? data.digests[key].hash : null);
+const getDigestSnapshot = (key) =>
+  data.digests[key] && Array.isArray(data.digests[key].snapshot) ? data.digests[key].snapshot : null;
 
-function setDigest(key, hash, iso) {
-  data.digests[key] = { hash, iso };
+function setDigest(key, hash, iso, snapshot) {
+  const prev = data.digests[key] || {};
+  data.digests[key] = {
+    hash,
+    iso,
+    snapshot: Array.isArray(snapshot) ? snapshot : prev.snapshot || null,
+  };
   save();
 }
 
@@ -237,6 +336,53 @@ function removeAdmin(id) {
   return true;
 }
 
+// ---- журнал действий администраторов ---------------------------
+
+function addAdminLog(adminId, action) {
+  data.adminLog.unshift({ at: Date.now(), adminId: String(adminId), action: String(action).slice(0, 200) });
+  if (data.adminLog.length > 60) data.adminLog.length = 60;
+  save();
+}
+
+const getAdminLog = (n = 15) => data.adminLog.slice(0, n);
+
+// ---- отложенные объявления -----------------------------------
+
+function addScheduledAnnounce({ text, atIso, atHHMM, group, by }) {
+  const id = crypto.randomBytes(4).toString('hex');
+  data.scheduledAnnouncements.push({
+    id,
+    text,
+    atIso,
+    atHHMM,
+    group: group || null,
+    by: String(by || ''),
+    createdAt: Date.now(),
+  });
+  save();
+  return id;
+}
+
+const listScheduledAnnounces = () =>
+  [...data.scheduledAnnouncements].sort((a, b) =>
+    `${a.atIso} ${a.atHHMM}`.localeCompare(`${b.atIso} ${b.atHHMM}`),
+  );
+
+function removeScheduledAnnounce(id) {
+  const i = data.scheduledAnnouncements.findIndex((x) => x.id === id);
+  if (i < 0) return false;
+  data.scheduledAnnouncements.splice(i, 1);
+  save();
+  return true;
+}
+
+/** Объявления, чьё время наступило (atIso/atHHMM <= сейчас). Не удаляет — это делает вызывающий. */
+function dueScheduledAnnounces(nowIso, nowHHMM) {
+  return data.scheduledAnnouncements.filter(
+    (x) => x.atIso < nowIso || (x.atIso === nowIso && x.atHHMM <= nowHHMM),
+  );
+}
+
 // ---- статистика -------------------------------------------------
 
 function stats() {
@@ -255,6 +401,7 @@ function stats() {
     teachers: subscribed.filter((u) => u.role === 'teacher' && u.teacherName).length,
     reminders: subscribed.filter((u) => Number(u.reminderMinutes) > 0).length,
     textFormat: subscribed.filter((u) => u.format === 'text').length,
+    imageFormat: subscribed.filter((u) => u.format === 'image').length,
     openQuestions: Object.keys(data.questions).length,
     byGroup,
   };
@@ -276,12 +423,21 @@ module.exports = {
   setMorning,
   setMorningTime,
   setMorningLastSent,
+  setMorningGreeting,
+  setTheme,
+  setPausedUntil,
+  setPauseEndNotified,
+  purgeExpiredPauses,
+  getNotesForDay,
+  setNote,
+  purgeOldNotes,
   setLastSent,
   subscribers,
   addQuestion,
   getQuestion,
   deleteQuestion,
   getDigest,
+  getDigestSnapshot,
   setDigest,
   digestEntries,
   purgeDigests,
@@ -289,6 +445,12 @@ module.exports = {
   isAdmin,
   addAdmin,
   removeAdmin,
+  addAdminLog,
+  getAdminLog,
+  addScheduledAnnounce,
+  listScheduledAnnounces,
+  removeScheduledAnnounce,
+  dueScheduledAnnounces,
   stats,
   _file: FILE,
 };
