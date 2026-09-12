@@ -90,6 +90,15 @@ module.exports = {
   // Пусто -> логирование в канал выключено. Бот должен быть участником этого сервера с правом писать в канал.
   logChannelId: (process.env.LOG_CHANNEL_ID || '1548245691707686982').trim(),
 
+  // Официальный API Яндекс.Расписаний (https://yandex.ru/dev/rasp/) — используется для
+  // автобусов, когда скрапинг rasp.yandex.ru стал отдавать капчу серверным запросам.
+  // Ключ обязателен для направления «дом -> город» (и «город -> дом» без точной остановки).
+  // Коды населённых пунктов не резолвятся по названию — их узнают вручную из адресной
+  // строки rasp.yandex.ru (см. YANDEX_HOME_CODE), дефолты ниже — для Петрозаводска/Новой Вилги.
+  yandexRaspApiKey: (process.env.YANDEX_RASP_API_KEY || '').trim(),
+  yandexCityCode: (process.env.YANDEX_CITY_CODE || 'c18').trim(),
+  yandexHomeCode: (process.env.YANDEX_HOME_CODE || 'c85997').trim(),
+
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
   // секунды -> мс, но не больше 60 с на запрос (защита от опечаток вроде "300000")
