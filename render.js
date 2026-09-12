@@ -216,4 +216,50 @@ function renderWeekImage(week) {
   return cv.toBuffer('image/png');
 }
 
-module.exports = { available, renderScheduleImage, renderWeekImage };
+/** @returns {Buffer|null} PNG-карточка погоды (советы + диапазоны) или null. */
+function renderWeatherImage(place, forecast) {
+  if (!canvas || !forecast || !Array.isArray(forecast.ranges)) return null;
+  const rows = forecast.ranges;
+  const advice = forecast.advice || [];
+  const W = 640;
+  const padX = 24;
+  const headH = 64;
+  const adviceLineH = 24;
+  const adviceH = advice.length ? advice.length * adviceLineH + 14 : 0;
+  const rowH = 30;
+  const H = headH + adviceH + rows.length * rowH + 24;
+
+  const cv = canvas.createCanvas(W, H);
+  const ctx = cv.getContext('2d');
+  const F = FONT;
+
+  ctx.fillStyle = CL.bg;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = CL.weekday;
+  ctx.fillRect(0, 0, W, headH);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `700 22px ${F}`;
+  ctx.fillText(fit(ctx, `Погода — ${place}`, W - padX * 2), padX, 41);
+
+  let y = headH + 26;
+  ctx.font = `700 14px ${F}`;
+  for (const a of advice) {
+    ctx.fillStyle = CL.accent;
+    ctx.fillText(fit(ctx, a, W - padX * 2), padX, y);
+    y += adviceLineH;
+  }
+  if (advice.length) y += 8;
+
+  ctx.font = `400 15px ${F}`;
+  for (const r of rows) {
+    ctx.fillStyle = CL.dim;
+    ctx.fillText(r.label, padX, y);
+    ctx.fillStyle = CL.text;
+    ctx.fillText(`${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`, padX + 260, y);
+    y += rowH;
+  }
+
+  return cv.toBuffer('image/png');
+}
+
+module.exports = { available, renderScheduleImage, renderWeekImage, renderWeatherImage };

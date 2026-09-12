@@ -1,10 +1,16 @@
 'use strict';
 
-// Погода для утреннего сообщения через open-meteo (без ключа, без лимитов на разумных объёмах).
-// По умолчанию — Петрозаводск (координаты в config.js, можно переопределить env WEATHER_LAT/LON/PLACE).
-// Всё best-effort: сеть недоела — morningLine() вернёт null или последнее удачное значение.
+// Погода через open-meteo (без ключа, без лимитов на разумных объёмах):
+//  - geocode(name)     — название населённого пункта -> координаты (Open-Meteo Geocoding API)
+//  - dayForecast(lat, lon) — почасовой прогноз на остаток сегодняшнего дня, схлопнутый
+//                            в диапазоны («11:00–13:00 — 🌦 +5»), плюс советы «возьми зонт» /
+//                            «надень куртку».
+// По умолчанию город — Петрозаводск (координаты в config.js, можно переопределить
+// env WEATHER_LAT/LON/PLACE). Второе (домашнее) место — своё у каждого пользователя,
+// задаётся в ⚙️ Настройки → 🏘 Не из города (geocode() вызывается один раз при вводе).
 
 const cfg = require('./config');
+const D = require('./dates');
 
 // Коды погоды WMO -> [эмодзи, текст]
 const WMO = {
@@ -38,65 +44,119 @@ const WMO = {
   99: ['⛈', 'гроза с градом'],
 };
 
-const ICE_CODES = new Set([56, 57, 66, 67]);
-const PRECIP_CODES = new Set([51, 53, 55, 61, 63, 65, 71, 73, 75, 77, 80, 81, 82, 85, 86]);
+const RAIN_CODES = new Set([51, 53, 55, 61, 63, 65, 80, 81, 82]);
+const SNOW_CODES = new Set([56, 57, 66, 67, 71, 73, 75, 77, 85, 86]);
+const STORM_CODES = new Set([95, 96, 99]);
 
-let _cache = { at: 0, data: null };
+const iconFor = (code) => (WMO[code] || ['🌡', 'погода'])[0];
 
-const fmtTemp = (t) => {
-  const r = Math.round(t);
-  return `${r > 0 ? '+' : ''}${r}°`;
-};
+// ---------------------------------------------------------------------------
+// Геокодинг: название места -> координаты (Open-Meteo Geocoding API, бесплатно)
+// ---------------------------------------------------------------------------
 
-async function fetchWeather() {
-  const url =
-    `https://api.open-meteo.com/v1/forecast?latitude=${cfg.weatherLat}&longitude=${cfg.weatherLon}` +
-    '&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m' +
-    `&wind_speed_unit=ms&timezone=${encodeURIComponent(cfg.timezone)}`;
+/** @returns {Promise<{lat:number, lon:number, name:string}|null>} */
+async function geocode(name) {
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=ru&format=json`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.min(cfg.httpTimeout, 10 * 1000));
   try {
     const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const j = await res.json();
-    const c = j && j.current;
-    if (!c || typeof c.temperature_2m !== 'number') throw new Error('ответ без current');
-    return {
-      tempC: c.temperature_2m,
-      feelsC: typeof c.apparent_temperature === 'number' ? c.apparent_temperature : c.temperature_2m,
-      code: Number(c.weather_code),
-      windMs: typeof c.wind_speed_10m === 'number' ? c.wind_speed_10m : null,
-    };
+    const list = Array.isArray(j.results) ? j.results : [];
+    if (!list.length) return null;
+    const best = list.find((r) => r.country_code === 'RU') || list[0];
+    return { lat: best.latitude, lon: best.longitude, name: best.name };
   } finally {
     clearTimeout(timer);
   }
 }
 
-function buildLine(w) {
-  const [icon, desc] = WMO[w.code] || ['🌡', 'погода'];
-  const parts = [`${icon} ${cfg.weatherPlace}: ${fmtTemp(w.tempC)}, ${desc}`];
-  if (Math.abs(Math.round(w.feelsC) - Math.round(w.tempC)) >= 3) {
-    parts.push(`ощущается ${fmtTemp(w.feelsC)}`);
+// ---------------------------------------------------------------------------
+// Почасовой прогноз на сегодня
+// ---------------------------------------------------------------------------
+
+async function fetchHourly(lat, lon) {
+  const url =
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    '&hourly=temperature_2m,apparent_temperature,weather_code' +
+    `&forecast_days=1&timezone=${encodeURIComponent(cfg.timezone)}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), Math.min(cfg.httpTimeout, 10 * 1000));
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    const h = j && j.hourly;
+    if (!h || !Array.isArray(h.time) || !Array.isArray(h.temperature_2m)) throw new Error('ответ без hourly');
+    return h.time.map((t, i) => ({
+      hhmm: String(t).slice(11, 16),
+      temp: h.temperature_2m[i],
+      feels: Array.isArray(h.apparent_temperature) ? h.apparent_temperature[i] : h.temperature_2m[i],
+      code: Number((h.weather_code || [])[i]),
+    }));
+  } finally {
+    clearTimeout(timer);
   }
-  if (w.windMs != null && w.windMs >= 10) parts.push(`ветер ${Math.round(w.windMs)} м/с`);
-  const icy = ICE_CODES.has(w.code) || (PRECIP_CODES.has(w.code) && w.tempC <= 1.5 && w.tempC >= -6);
-  if (icy) parts.push('возможен гололёд ⚠️');
-  return parts.join(', ');
 }
+
+/** Схлопывает подряд идущие часы с одинаковой (округлённой) температурой и иконкой в один диапазон. */
+function mergeRanges(hours) {
+  const merged = [];
+  for (const h of hours) {
+    const temp = Math.round(h.temp);
+    const icon = iconFor(h.code);
+    const last = merged[merged.length - 1];
+    if (last && last.temp === temp && last.icon === icon) last.to = h.hhmm;
+    else merged.push({ from: h.hhmm, to: h.hhmm, temp, icon });
+  }
+  return merged.map((r) => ({
+    label: r.from === r.to ? r.from : `${r.from}–${r.to}`,
+    icon: r.icon,
+    temp: r.temp,
+  }));
+}
+
+/** «Возьми зонт» / «надень куртку» и т.п. — по минимальной ощущаемой и осадкам за день. */
+function adviceLines(hours) {
+  if (!hours.length) return [];
+  const lines = [];
+  const feelsVals = hours.map((h) => h.feels).filter((v) => Number.isFinite(v));
+  const minFeels = feelsVals.length ? Math.min(...feelsVals) : hours[0].temp;
+  const codes = hours.map((h) => h.code);
+
+  if (codes.some((c) => STORM_CODES.has(c))) lines.push('⛈ Возьми зонт, ожидается гроза');
+  else if (codes.some((c) => RAIN_CODES.has(c))) lines.push('☔ Возьми зонт');
+  else if (codes.some((c) => SNOW_CODES.has(c))) lines.push('❄️ Возьми зонт или капюшон, идёт снег');
+
+  if (minFeels >= 18) lines.push('🩳 Можно налегке');
+  else if (minFeels >= 10) lines.push('🧥 Лёгкая куртка');
+  else if (minFeels >= 1) lines.push('🧥 Куртка потеплее');
+  else if (minFeels >= -9) lines.push('🧥 Тёплая куртка, шапка');
+  else lines.push('🥶 Надевай зимнюю куртку, тепло одевайся');
+
+  return lines;
+}
+
+const _dayCache = new Map(); // "lat,lon" -> { at, data }
 
 /**
- * Строка погоды для «Доброе утро», напр. «🌨 Петрозаводск: −5°, снег, возможен гололёд ⚠️».
- * @returns {Promise<string|null>}
+ * Прогноз на остаток сегодняшнего дня: { ranges: [{label, icon, temp}], advice: [строки] }.
+ * @returns {Promise<{ranges: Array, advice: string[]}>}
  */
-async function morningLine({ maxAgeMs = 10 * 60 * 1000 } = {}) {
-  if (_cache.data && Date.now() - _cache.at < maxAgeMs) return buildLine(_cache.data);
-  try {
-    const w = await fetchWeather();
-    _cache = { at: Date.now(), data: w };
-    return buildLine(w);
-  } catch {
-    return _cache.data ? buildLine(_cache.data) : null; // отдаём устаревшее, если было
-  }
+async function dayForecast(lat, lon, { maxAgeMs = 10 * 60 * 1000 } = {}) {
+  const key = `${Number(lat).toFixed(3)},${Number(lon).toFixed(3)}`;
+  const hit = _dayCache.get(key);
+  if (hit && Date.now() - hit.at < maxAgeMs) return hit.data;
+
+  const all = await fetchHourly(lat, lon);
+  const now = D.tzNow();
+  const nowHHMM = `${D.pad(now.h)}:00`;
+  const rest = all.filter((h) => h.hhmm >= nowHHMM);
+  const hours = rest.length ? rest : all;
+  const data = { ranges: mergeRanges(hours), advice: adviceLines(hours) };
+  _dayCache.set(key, { at: Date.now(), data });
+  return data;
 }
 
-module.exports = { morningLine };
+module.exports = { geocode, dayForecast };

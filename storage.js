@@ -79,6 +79,12 @@ function get(userId) {
     pausedUntil: r.pausedUntil || null,
     pauseEndNotified: r.pauseEndNotified || null,
     theme: r.theme || 'default',
+    away: Boolean(r.away),
+    homePlace: r.homePlace || null,
+    homeStop: r.homeStop || null,
+    homeLat: typeof r.homeLat === 'number' ? r.homeLat : null,
+    homeLon: typeof r.homeLon === 'number' ? r.homeLon : null,
+    weatherFormat: r.weatherFormat === 'text' || r.weatherFormat === 'image' ? r.weatherFormat : 'embed',
     lastSent: r.lastSent || null,
   };
 }
@@ -163,6 +169,41 @@ function setMorningGreeting(userId, text) {
 
 function setTheme(userId, theme) {
   rec(userId).theme = theme || 'default';
+  save();
+}
+
+function setWeatherFormat(userId, format) {
+  rec(userId).weatherFormat = format === 'text' || format === 'image' ? format : 'embed';
+  save();
+}
+
+// ---- «я не из города» (домашние погода + автобус) ------------------
+
+function setAway(userId, value) {
+  rec(userId).away = Boolean(value);
+  save();
+}
+
+/** Населённый пункт + координаты (геокодинг делается один раз при вводе, снаружи). null — снять. */
+function setHomePlace(userId, place, lat, lon) {
+  const r = rec(userId);
+  if (place) {
+    r.homePlace = String(place).slice(0, 80);
+    r.homeLat = Number(lat);
+    r.homeLon = Number(lon);
+  } else {
+    delete r.homePlace;
+    delete r.homeLat;
+    delete r.homeLon;
+    delete r.homeStop;
+  }
+  save();
+}
+
+function setHomeStop(userId, stop) {
+  const r = rec(userId);
+  if (stop) r.homeStop = String(stop).slice(0, 60);
+  else delete r.homeStop;
   save();
 }
 
@@ -260,6 +301,12 @@ function subscribers() {
       pausedUntil: r.pausedUntil || null,
       pauseEndNotified: r.pauseEndNotified || null,
       theme: r.theme || 'default',
+      away: Boolean(r.away),
+      homePlace: r.homePlace || null,
+      homeStop: r.homeStop || null,
+      homeLat: typeof r.homeLat === 'number' ? r.homeLat : null,
+      homeLon: typeof r.homeLon === 'number' ? r.homeLon : null,
+      weatherFormat: r.weatherFormat === 'text' || r.weatherFormat === 'image' ? r.weatherFormat : 'embed',
       lastSent: r.lastSent || null,
     }));
 }
@@ -425,6 +472,10 @@ module.exports = {
   setMorningLastSent,
   setMorningGreeting,
   setTheme,
+  setWeatherFormat,
+  setAway,
+  setHomePlace,
+  setHomeStop,
   setPausedUntil,
   setPauseEndNotified,
   purgeExpiredPauses,

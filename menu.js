@@ -118,6 +118,9 @@ function buildMenu(s, extras = {}) {
     new ButtonBuilder().setCustomId('menu:help').setLabel('ℹ️ Помощь').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:refresh').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
   );
+  if (extras.showBus) {
+    row3.addComponents(new ButtonBuilder().setCustomId('menu:bus').setLabel('🚌 Автобус').setStyle(ButtonStyle.Secondary));
+  }
 
   return { content: '', embeds: [embed], files: [], components: [row1, row2, row3] };
 }
@@ -159,6 +162,7 @@ function buildHelpView({ inMenu = false } = {}) {
           '⏸ Пауза — заглушить всё на время (практика, отпуск); напомнит за день до конца',
           '⏰ Напоминания за N минут · ☀️ Утро (+ свой текст приветствия)',
           'Формат: эмбед / текст / картинка · 🎨 цвет эмбеда · показывать ли «окна»',
+          '🏘 **Не из города** — погода по месту жительства и кнопка «🚌 Автобус» (до техникума и обратно)',
         ].join('\n'),
       },
     )
@@ -248,6 +252,8 @@ function buildSettingsView(s) {
       { name: 'Формат', value: fmtField(s.format), inline: true },
       { name: 'Цвет', value: `🎨 ${THEME_LABEL[s.theme] || s.theme || 'по умолчанию'}`, inline: true },
       { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
+      { name: 'Не из города', value: s.away && s.homePlace ? `🏘 ${s.homePlace}` : '—', inline: true },
+      { name: 'Погода', value: fmtField(s.weatherFormat), inline: true },
     );
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -260,6 +266,10 @@ function buildSettingsView(s) {
       .setLabel(paused ? '⏸ Пауза (вкл)' : '⏸ Пауза')
       .setStyle(paused ? ButtonStyle.Success : ButtonStyle.Secondary)
       .setDisabled(noSubj),
+    new ButtonBuilder()
+      .setCustomId('set:away')
+      .setLabel(s.away ? '🏘 Не из города (вкл)' : '🏘 Не из города')
+      .setStyle(s.away ? ButtonStyle.Success : ButtonStyle.Secondary),
   );
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -283,9 +293,157 @@ function buildSettingsView(s) {
       .setLabel(`Формат: ${fmtLabel(s.format)}`)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('set:theme').setLabel('🎨 Цвет').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('set:wthrformat').setLabel(`Погода: ${fmtLabel(s.weatherFormat)}`).setStyle(ButtonStyle.Secondary),
+  );
+  const row4 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('set:back').setLabel('← В меню').setStyle(ButtonStyle.Primary),
   );
-  return { content: '', embeds: [embed], files: [], components: [row1, row2, row3] };
+  return { content: '', embeds: [embed], files: [], components: [row1, row2, row3, row4] };
+}
+
+// ---- «Я не из города» — домашние погода и автобус -------------------
+
+function buildAwayView(s) {
+  const embed = new EmbedBuilder()
+    .setColor(C.weekday)
+    .setTitle('🏘 Я не из города')
+    .setDescription(
+      'Если включено — присылаю ещё и погоду по месту жительства (вторым сообщением, отдельно от городской), ' +
+        'и расписание автобуса до техникума и обратно (кнопка «🚌 Автобус» в меню).\n\n' +
+        `Статус: ${s.away ? '✅ включено' : '⛔ выключено'}\n` +
+        `Населённый пункт: ${s.homePlace ? `**${s.homePlace}**` : '_не указан_'}\n` +
+        `Остановка: ${s.homeStop ? `**${s.homeStop}**` : '_не указана — время автобуса будет примерным_'}`,
+    );
+  return {
+    content: '',
+    embeds: [embed],
+    files: [],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('away:toggle')
+          .setLabel(s.away ? 'Выключить' : 'Включить')
+          .setStyle(s.away ? ButtonStyle.Danger : ButtonStyle.Success)
+          .setDisabled(!s.homePlace && !s.away),
+        new ButtonBuilder().setCustomId('away:place').setLabel('🏘 Населённый пункт').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId('away:stop')
+          .setLabel('🚏 Остановка')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!s.homePlace),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('away:back').setLabel('← Назад').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
+}
+
+function awayPlaceModal(current) {
+  const input = new TextInputBuilder()
+    .setCustomId('place')
+    .setLabel('Населённый пункт (пусто — выключить)')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(80)
+    .setPlaceholder('Новая Вилга');
+  if (current) input.setValue(current);
+  return new ModalBuilder()
+    .setCustomId('modal:awayplace')
+    .setTitle('Населённый пункт')
+    .addComponents(new ActionRowBuilder().addComponents(input));
+}
+
+function awayStopModal(current) {
+  const input = new TextInputBuilder()
+    .setCustomId('stop')
+    .setLabel('Точная остановка (пусто — примерно)')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(60)
+    .setPlaceholder('Новая Вилга-2');
+  if (current) input.setValue(current);
+  return new ModalBuilder()
+    .setCustomId('modal:awaystop')
+    .setTitle('Остановка')
+    .addComponents(new ActionRowBuilder().addComponents(input));
+}
+
+// ---- Погода: сообщение (эмбед / текст / картинка) и расписание автобуса ----
+
+function buildWeatherMessage(place, forecast, format) {
+  const advice = forecast.advice || [];
+  const body = (forecast.ranges || [])
+    .map((r) => `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`)
+    .join('\n');
+
+  if (format === 'image') {
+    const buf = render.available() ? render.renderWeatherImage(place, forecast) : null;
+    if (buf) return { content: '', embeds: [], files: [{ attachment: buf, name: 'pogoda.png' }] };
+    // нет canvas — откат на эмбед
+  }
+  if (format === 'text') {
+    const lines = [`**🌤 Погода — ${place}**`];
+    if (advice.length) lines.push(advice.join('\n'));
+    lines.push('', body || 'нет данных');
+    return { content: lines.join('\n').slice(0, 1990), embeds: [], files: [] };
+  }
+  const embed = new EmbedBuilder()
+    .setColor(C.weekday)
+    .setTitle(`🌤 Погода — ${place}`)
+    .addFields({ name: 'Прогноз на сегодня', value: clip(body || 'нет данных') });
+  if (advice.length) embed.setDescription(advice.join('\n'));
+  return { content: '', embeds: [embed], files: [] };
+}
+
+/**
+ * direction 'toHome' — едет из города домой: отправление с автовокзала точное,
+ * а вот прибытие домой — плюс-минус ~10 мин (обычно задерживается).
+ * direction 'toCity' — едет из дома в город: домой автобус подъезжает
+ * тоже с задержкой ~10 мин (это промежуточная точка маршрута), а вот
+ * прибытие в город после — как в расписании.
+ */
+function busLine(rows, direction) {
+  if (!rows || !rows.length) return 'нет данных';
+  const now = Date.now();
+  const next = rows.find((r) => r.epoch && r.epoch * 1000 > now);
+  if (!next) return 'рейсов на сегодня больше нет';
+  const head = [next.number, next.title].filter(Boolean).join(' ');
+  const rel = `<t:${next.epoch}:R>`;
+  const dep = next.depHHMM ? `отправление ${next.depHHMM}` : '';
+  const arr = next.arrHHMM ? `прибытие ${next.arrHHMM}` : '';
+  const late = ' (±10 мин)';
+  const detail =
+    direction === 'toHome'
+      ? [dep, arr && `${arr}${late}`].filter(Boolean).join(', ')
+      : [dep && `${dep}${late}`, arr].filter(Boolean).join(', ');
+  return `${head ? `${head} — ` : ''}${rel}${detail ? `\n${detail}` : ''}`;
+}
+
+function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl) {
+  const list = (rows) => clip(rows.map((r) => `${r.depHHMM} → ${r.arrHHMM}`).join('\n') || '—');
+  const withLink = (line, url) => (url ? `${line}\n🔗 Проверить: ${url}` : line);
+  const embed = new EmbedBuilder()
+    .setColor(C.weekday)
+    .setTitle(`🚌 Автобус — ${place}`)
+    .addFields(
+      { name: 'Ближайший из города (домой)', value: withLink(busLine(toHomeRows, 'toHome'), toHomeUrl), inline: false },
+      { name: 'Ближайший из дома (в город)', value: withLink(busLine(toCityRows, 'toCity'), toCityUrl), inline: false },
+      { name: 'Все рейсы из города', value: list(toHomeRows), inline: true },
+      { name: 'Все рейсы из дома', value: list(toCityRows), inline: true },
+    )
+    .setFooter({ text: 'из города — автовокзал/rasp.yandex.ru, из дома — rasp.yandex.ru · время может отличаться' });
+  return {
+    content: '',
+    embeds: [embed],
+    files: [],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('menu:bus').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('menu:refresh').setLabel('← В меню').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
 }
 
 // ---- Пауза подписки -------------------------------------------------
@@ -1489,6 +1647,11 @@ module.exports = {
   buildHelpView,
   buildPauseView,
   pauseDateModal,
+  buildAwayView,
+  awayPlaceModal,
+  awayStopModal,
+  buildWeatherMessage,
+  buildBusView,
   nextFormat,
   nextTheme,
   buildRoleView,

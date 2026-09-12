@@ -17,6 +17,7 @@ const storage = require('./storage');
 const ss = require('./scheduleSource');
 const render = require('./render');
 const weather = require('./weather');
+const bus = require('./busSource');
 const menu = require('./menu');
 
 if (!cfg.token) {
@@ -73,6 +74,12 @@ function effState(uid) {
     morningGreeting: s.morningGreeting,
     pausedUntil: s.pausedUntil,
     theme: s.theme || 'default',
+    away: s.away,
+    homePlace: s.homePlace,
+    homeStop: s.homeStop,
+    homeLat: s.homeLat,
+    homeLon: s.homeLon,
+    weatherFormat: s.weatherFormat || 'embed',
   };
 }
 
@@ -109,7 +116,12 @@ function menuView(uid) {
       /* ignore */
     }
   }
-  return menu.buildMenu(s, { nextBroadcastEpoch: nb, nextPair, pausedUntil: paused ? s.pausedUntil : null });
+  return menu.buildMenu(s, {
+    nextBroadcastEpoch: nb,
+    nextPair,
+    pausedUntil: paused ? s.pausedUntil : null,
+    showBus: Boolean(s.away && s.homePlace),
+  });
 }
 
 const notPublishedText = (t) =>
@@ -352,6 +364,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('role:')) return await onRoleButton(interaction);
       if (id.startsWith('set:')) return await onSettingsButton(interaction);
       if (id.startsWith('pause:')) return await onPauseButton(interaction);
+      if (id.startsWith('away:')) return await onAwayButton(interaction);
       if (id.startsWith('days:')) return await onDaysButton(interaction);
       if (id.startsWith('rem:')) return await onReminderButton(interaction);
       if (id.startsWith('mrn:')) return await onMorningButton(interaction);
@@ -642,6 +655,28 @@ async function onMenuButton(interaction) {
     case 'help':
       await interaction.update(menu.buildHelpView({ inMenu: true }));
       return;
+    case 'bus': {
+      if (!s.away || !s.homePlace) {
+        return void (
+          await interaction.reply({ content: 'Сначала укажи населённый пункт: ⚙️ Настройки → 🏘 Не из города.' })
+        );
+      }
+      await interaction.update({ content: '⏳ Гружу расписание автобусов…', embeds: [], components: [] });
+      const opts = s.homeStop ? { matchStop: s.homeStop } : { matchLoose: s.homePlace };
+      try {
+        const [toHomeRows, toCityRows] = await Promise.all([
+          bus.toHome(s.homePlace, opts).catch(() => []),
+          bus.toCity(s.homePlace, opts).catch(() => []),
+        ]);
+        const toHomeUrl = bus.sourceUrl('toHome', toHomeRows, s.homePlace, s.homeStop);
+        const toCityUrl = bus.sourceUrl('toCity', toCityRows, s.homePlace, s.homeStop);
+        await interaction.editReply(menu.buildBusView(s.homePlace, toHomeRows, toCityRows, toHomeUrl, toCityUrl));
+      } catch (err) {
+        log('WARN', `автобус: ${err.message}`);
+        await interaction.editReply({ content: 'Не удалось получить расписание автобусов, попробуй позже.', embeds: [], components: [] });
+      }
+      return;
+    }
     case 'refresh':
       await interaction.update(menuView(uid));
       return;
@@ -816,6 +851,23 @@ async function onPauseButton(interaction) {
   }
 }
 
+async function onAwayButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('away:'.length);
+
+  if (rest === 'back') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
+  if (rest === 'toggle') {
+    const s = effState(uid);
+    if (!s.away && !s.homePlace) {
+      return void (await interaction.reply({ content: 'Сначала укажи населённый пункт (кнопка «🏘 Населённый пункт»).' }));
+    }
+    storage.setAway(uid, !s.away);
+    return void (await interaction.update(menu.buildAwayView(effState(uid))));
+  }
+  if (rest === 'place') return void (await interaction.showModal(menu.awayPlaceModal(effState(uid).homePlace)));
+  if (rest === 'stop') return void (await interaction.showModal(menu.awayStopModal(effState(uid).homeStop)));
+}
+
 async function onDaysButton(interaction) {
   const uid = interaction.user.id;
   const rest = interaction.customId.slice('days:'.length);
@@ -885,6 +937,11 @@ async function onSettingsButton(interaction) {
       return void (await interaction.update(menu.buildRoleView(s)));
     case 'pause':
       return void (await interaction.update(menu.buildPauseView(s)));
+    case 'away':
+      return void (await interaction.update(menu.buildAwayView(s)));
+    case 'wthrformat':
+      storage.setWeatherFormat(uid, menu.nextFormat(s.weatherFormat));
+      return void (await back());
     case 'togglesub':
       storage.setSubscribed(uid, !s.subscribed);
       return void (await back());
@@ -1156,6 +1213,45 @@ async function onModal(interaction) {
     return;
   }
 
+  if (id === 'modal:awayplace') {
+    const place = interaction.fields.getTextInputValue('place').trim();
+    if (!place) {
+      storage.setHomePlace(uid, null, null, null);
+      storage.setAway(uid, false);
+      const view = menu.buildAwayView(effState(uid));
+      if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+      else await interaction.reply(view);
+      return;
+    }
+    const fromMessage = interaction.isFromMessage && interaction.isFromMessage();
+    if (fromMessage) await interaction.update({ content: '⏳ Ищу населённый пункт…', embeds: [], components: [] });
+    else await interaction.deferReply();
+    let geo = null;
+    try {
+      geo = await weather.geocode(place);
+    } catch (err) {
+      log('WARN', `геокодинг "${place}": ${err.message}`);
+    }
+    if (!geo) {
+      await interaction.editReply({ content: `Не нашёл «${place}» на карте. Проверь написание и попробуй ещё раз.` });
+      return;
+    }
+    storage.setHomePlace(uid, place, geo.lat, geo.lon);
+    log('INFO', `${uid} задал населённый пункт «${place}» (${geo.lat}, ${geo.lon})`);
+    await interaction.editReply(menu.buildAwayView(effState(uid)));
+    return;
+  }
+
+  if (id === 'modal:awaystop') {
+    const stop = interaction.fields.getTextInputValue('stop').trim();
+    storage.setHomeStop(uid, stop || null);
+    log('INFO', `${uid} остановка: ${stop || 'снял'}`);
+    const view = menu.buildAwayView(effState(uid));
+    if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+    else await interaction.reply(view);
+    return;
+  }
+
   if (id === 'modal:morningtime') {
     const hhmm = D.parseHHMM(interaction.fields.getTextInputValue('time'));
     if (!hhmm) return void (await interaction.reply({ content: 'Неверный формат. Нужно ЧЧ:ММ, например 07:30.' }));
@@ -1417,12 +1513,12 @@ async function morningTick() {
     /* нет данных — всё равно поздороваемся */
   }
 
-  let weatherLine = null;
+  let cityForecast = null;
   if (cfg.weatherEnabled) {
     try {
-      weatherLine = await weather.morningLine();
-    } catch {
-      /* без погоды — не беда */
+      cityForecast = await weather.dayForecast(cfg.weatherLat, cfg.weatherLon);
+    } catch (err) {
+      log('WARN', `погода (город): ${err.message}`);
     }
   }
 
@@ -1453,11 +1549,26 @@ async function morningTick() {
         }
       }
     }
-    if (weatherLine) body += `\n${weatherLine}`;
-
     try {
       const user = await client.users.fetch(u.userId);
       await user.send({ content: body });
+      if (cfg.weatherEnabled) {
+        if (u.away && u.homePlace && u.homeLat != null && u.homeLon != null) {
+          try {
+            const homeForecast = await weather.dayForecast(u.homeLat, u.homeLon);
+            await user.send(menu.buildWeatherMessage(u.homePlace, homeForecast, u.weatherFormat));
+          } catch (err) {
+            log('WARN', `погода (дом, ${u.userId}): ${err.message}`);
+          }
+        }
+        if (cityForecast) {
+          try {
+            await user.send(menu.buildWeatherMessage(cfg.weatherPlace, cityForecast, u.weatherFormat));
+          } catch (err) {
+            log('WARN', `погода (город, ${u.userId}): ${err.message}`);
+          }
+        }
+      }
       storage.setMorningLastSent(u.userId, todayIso);
     } catch (err) {
       if (err && err.code === 50007) storage.setMorningLastSent(u.userId, todayIso);
