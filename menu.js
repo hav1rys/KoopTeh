@@ -357,11 +357,11 @@ function awayPlaceModal(current) {
 function awayStopModal(current) {
   const input = new TextInputBuilder()
     .setCustomId('stop')
-    .setLabel('Точная остановка (пусто — примерно)')
+    .setLabel('Номер (1/2/3) или название (пусто — примерно)')
     .setStyle(TextInputStyle.Short)
     .setRequired(false)
     .setMaxLength(60)
-    .setPlaceholder('Новая Вилга-2');
+    .setPlaceholder('2 (или «кладбище», если другая остановка)');
   if (current) input.setValue(current);
   return new ModalBuilder()
     .setCustomId('modal:awaystop')
@@ -403,13 +403,20 @@ function buildWeatherMessage(place, forecast, format) {
  * тоже с задержкой ~10 мин (это промежуточная точка маршрута), а вот
  * прибытие в город после — как в расписании.
  */
-function busLine(rows, direction) {
-  if (!rows || !rows.length) return 'нет данных';
+/** Расписание одно и то же каждый день («ежедневно» у перевозчика) — на нужный день просто пересчитываем эпохи. */
+function withEpochs(rows, target) {
+  return (rows || []).map((r) => ({ ...r, epoch: r.depHHMM ? D.epochAt(target, r.depHHMM) : null }));
+}
+
+function busLine(rows, direction, target) {
+  const isToday = D.iso(target) === D.iso(D.todayParts());
+  const dated = withEpochs(rows, target);
+  if (!dated.length) return 'нет данных';
   const now = Date.now();
-  const next = rows.find((r) => r.epoch && r.epoch * 1000 > now);
-  if (!next) return 'рейсов на сегодня больше нет';
+  const next = isToday ? dated.find((r) => r.epoch && r.epoch * 1000 > now) : dated[0];
+  if (!next) return 'рейсов на этот день больше нет';
   const head = [next.number, next.title].filter(Boolean).join(' ');
-  const rel = `<t:${next.epoch}:R>`;
+  const rel = next.epoch ? `<t:${next.epoch}:R>` : `в ${next.depHHMM}`;
   const dep = next.depHHMM ? `отправление ${next.depHHMM}` : '';
   const arr = next.arrHHMM ? `прибытие ${next.arrHHMM}` : '';
   const late = ' (±10 мин)';
@@ -420,24 +427,34 @@ function busLine(rows, direction) {
   return `${head ? `${head} — ` : ''}${rel}${detail ? `\n${detail}` : ''}`;
 }
 
-function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl) {
-  const list = (rows) => clip(rows.map((r) => `${r.depHHMM} → ${r.arrHHMM}`).join('\n') || '—');
+function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl, isoStr) {
+  const target = D.partsFromIso(isoStr) || D.todayParts();
+  const todayIso = D.iso(D.todayParts());
+  const tomIso = D.iso(D.tomorrowParts());
+  const nav = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`bus:prev:${isoStr}`).setLabel('◀').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('bus:jump:today').setLabel('Сегодня').setStyle(ButtonStyle.Secondary).setDisabled(isoStr === todayIso),
+    new ButtonBuilder().setCustomId('bus:jump:tomorrow').setLabel('Завтра').setStyle(ButtonStyle.Secondary).setDisabled(isoStr === tomIso),
+    new ButtonBuilder().setCustomId(`bus:next:${isoStr}`).setLabel('▶').setStyle(ButtonStyle.Secondary),
+  );
+  const list = (rows) => clip((rows || []).map((r) => `${r.depHHMM} → ${r.arrHHMM}`).join('\n') || '—');
   const withLink = (line, url) => (url ? `${line}\n🔗 Проверить: ${url}` : line);
   const embed = new EmbedBuilder()
     .setColor(C.weekday)
-    .setTitle(`🚌 Автобус — ${place}`)
+    .setTitle(`🚌 Автобус — ${place} · ${D.fmtDM(target)} (${D.weekdayRu(target)})`)
     .addFields(
-      { name: 'Ближайший из города (домой)', value: withLink(busLine(toHomeRows, 'toHome'), toHomeUrl), inline: false },
-      { name: 'Ближайший из дома (в город)', value: withLink(busLine(toCityRows, 'toCity'), toCityUrl), inline: false },
+      { name: 'Ближайший из города (домой)', value: withLink(busLine(toHomeRows, 'toHome', target), toHomeUrl), inline: false },
+      { name: 'Ближайший из дома (в город)', value: withLink(busLine(toCityRows, 'toCity', target), toCityUrl), inline: false },
       { name: 'Все рейсы из города', value: list(toHomeRows), inline: true },
       { name: 'Все рейсы из дома', value: list(toCityRows), inline: true },
     )
-    .setFooter({ text: 'из города — автовокзал/rasp.yandex.ru, из дома — rasp.yandex.ru · время может отличаться' });
+    .setFooter({ text: 'расписание ежедневное · из города — автовокзал/Яндекс, из дома — Яндекс' });
   return {
     content: '',
     embeds: [embed],
     files: [],
     components: [
+      nav,
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('menu:bus').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('menu:refresh').setLabel('← В меню').setStyle(ButtonStyle.Secondary),

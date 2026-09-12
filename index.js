@@ -236,6 +236,58 @@ async function showLookup(interaction, uid, kind, params, target, { fresh = fals
 // uid -> список групп (для листания)
 const groupCache = new Map();
 
+// -------- расписание автобусов (кэш на пользователя, листание по датам) ------
+
+const busCache = new Map(); // uid -> { at, place, homeStop, toHomeRows, toCityRows, toHomeUrl, toCityUrl }
+
+async function loadBusData(uid, s, force = false) {
+  const hit = busCache.get(uid);
+  if (!force && hit && Date.now() - hit.at < 10 * 60 * 1000) return hit;
+  const opts = { stop: s.homeStop };
+  const [toHomeRows, toCityRows] = await Promise.all([
+    bus.toHome(s.homePlace, opts).catch(() => []),
+    bus.toCity(s.homePlace, opts).catch(() => []),
+  ]);
+  const data = {
+    at: Date.now(),
+    place: s.homePlace,
+    toHomeRows,
+    toCityRows,
+    toHomeUrl: bus.sourceUrl('toHome', s.homePlace, s.homeStop),
+    toCityUrl: bus.sourceUrl('toCity', s.homePlace, s.homeStop),
+  };
+  busCache.set(uid, data);
+  return data;
+}
+
+/** Расписание автобусов не зависит от даты (у перевозчика оно ежедневное) — листание дат просто
+ * пересчитывает ближайший рейс/обратный отсчёт относительно другого дня, без повторной загрузки. */
+async function renderBusView(interaction, uid, targetIso, force = false) {
+  const s = effState(uid);
+  try {
+    const data = await loadBusData(uid, s, force);
+    await interaction.editReply(menu.buildBusView(data.place, data.toHomeRows, data.toCityRows, data.toHomeUrl, data.toCityUrl, targetIso));
+  } catch (err) {
+    log('WARN', `автобус: ${err.message}`);
+    await interaction.editReply({ content: 'Не удалось получить расписание автобусов, попробуй позже.', embeds: [], components: [] });
+  }
+}
+
+async function onBusButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('bus:'.length);
+  let target = null;
+  if (rest === 'jump:today') target = D.todayParts();
+  else if (rest === 'jump:tomorrow') target = D.tomorrowParts();
+  else if (rest.startsWith('prev:') || rest.startsWith('next:')) {
+    const b = D.partsFromIso(rest.slice(5));
+    if (b) target = D.shiftParts(b, rest.startsWith('prev:') ? -1 : 1);
+  }
+  if (!target) return;
+  await interaction.update({ content: '⏳ Обновляю…', embeds: [], components: [] });
+  await renderBusView(interaction, uid, D.iso(target));
+}
+
 // -------------------------------------------------------------------- клиент
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages] });
@@ -365,6 +417,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('set:')) return await onSettingsButton(interaction);
       if (id.startsWith('pause:')) return await onPauseButton(interaction);
       if (id.startsWith('away:')) return await onAwayButton(interaction);
+      if (id.startsWith('bus:')) return await onBusButton(interaction);
       if (id.startsWith('days:')) return await onDaysButton(interaction);
       if (id.startsWith('rem:')) return await onReminderButton(interaction);
       if (id.startsWith('mrn:')) return await onMorningButton(interaction);
@@ -662,19 +715,7 @@ async function onMenuButton(interaction) {
         );
       }
       await interaction.update({ content: '⏳ Гружу расписание автобусов…', embeds: [], components: [] });
-      const opts = s.homeStop ? { matchStop: s.homeStop } : { matchLoose: s.homePlace };
-      try {
-        const [toHomeRows, toCityRows] = await Promise.all([
-          bus.toHome(s.homePlace, opts).catch(() => []),
-          bus.toCity(s.homePlace, opts).catch(() => []),
-        ]);
-        const toHomeUrl = bus.sourceUrl('toHome', toHomeRows, s.homePlace, s.homeStop);
-        const toCityUrl = bus.sourceUrl('toCity', toCityRows, s.homePlace, s.homeStop);
-        await interaction.editReply(menu.buildBusView(s.homePlace, toHomeRows, toCityRows, toHomeUrl, toCityUrl));
-      } catch (err) {
-        log('WARN', `автобус: ${err.message}`);
-        await interaction.editReply({ content: 'Не удалось получить расписание автобусов, попробуй позже.', embeds: [], components: [] });
-      }
+      await renderBusView(interaction, uid, D.iso(D.todayParts()), true);
       return;
     }
     case 'refresh':
@@ -1215,6 +1256,7 @@ async function onModal(interaction) {
 
   if (id === 'modal:awayplace') {
     const place = interaction.fields.getTextInputValue('place').trim();
+    busCache.delete(uid);
     if (!place) {
       storage.setHomePlace(uid, null, null, null);
       storage.setAway(uid, false);
@@ -1245,6 +1287,7 @@ async function onModal(interaction) {
   if (id === 'modal:awaystop') {
     const stop = interaction.fields.getTextInputValue('stop').trim();
     storage.setHomeStop(uid, stop || null);
+    busCache.delete(uid);
     log('INFO', `${uid} остановка: ${stop || 'снял'}`);
     const view = menu.buildAwayView(effState(uid));
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
