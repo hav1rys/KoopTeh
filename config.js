@@ -86,6 +86,10 @@ module.exports = {
   healthAlertEnabled: !/^(0|false|no|off)$/i.test((process.env.HEALTH_ALERT_ENABLED || '').trim()),
   healthAlertHours: positiveNumber(process.env.HEALTH_ALERT_HOURS, 3),
 
+  // Канал на сервере для подробного лога действий (регистрация, смена группы, рассылка и т.д.).
+  // Пусто -> логирование в канал выключено. Бот должен быть участником этого сервера с правом писать в канал.
+  logChannelId: (process.env.LOG_CHANNEL_ID || '1548245691707686982').trim(),
+
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
   // секунды -> мс, но не больше 60 с на запрос (защита от опечаток вроде "300000")

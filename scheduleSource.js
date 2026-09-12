@@ -297,6 +297,28 @@ function pairNoFromCell(cell) {
 /** Нормализация фамилии для сравнения. */
 const normName = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я-]/g, '');
 
+/**
+ * Другие группы в этой же строке с ТЕМ ЖЕ предметом+преподавателем+кабинетом —
+ * значит пара совмещённая (общая для нескольких групп). Совпадение только по
+ * всем трём полям сразу — предмет и кабинет по отдельности слишком часто
+ * совпадают случайно, а вот такая тройка — практически наверняка одна пара.
+ */
+function findCombinedGroups(header, row, ownCol, ownLesson) {
+  if (!ownLesson.subject || !ownLesson.teacher || !ownLesson.room) return [];
+  const names = [];
+  for (let i = 2; i < row.length; i++) {
+    if (i === ownCol) continue;
+    const cell = (row[i] || '').trim();
+    if (!cell) continue;
+    const p = parseLesson(cell);
+    if (p.subject === ownLesson.subject && p.teacher === ownLesson.teacher && p.room === ownLesson.room) {
+      const hdr = String(header[i] || '').replace(/\s+/g, ' ').trim();
+      if (hdr) names.push(hdr);
+    }
+  }
+  return names;
+}
+
 // Расписание звонков (время в таблице указывается не всегда — берём отсюда по номеру пары).
 const BELL_WEEKDAY = {
   1: ['08:30', '09:50'], 2: ['10:00', '11:20'], 3: ['11:50', '13:10'], 4: ['13:30', '14:50'],
@@ -417,7 +439,8 @@ function buildEntries(blocks, group, weekend = false) {
       const pn = pair ?? pairNoFromCell(groupCell);
       [start, end] = fillTime(start, end, pn);
       const p = parseLesson(groupCell);
-      entries.push({ kind: 'lesson', pair: pn, start, end, ...p, line: lessonLine(p) });
+      const combinedWith = findCombinedGroups(chosen.header, row, col, p);
+      entries.push({ kind: 'lesson', pair: pn, start, end, ...p, line: lessonLine(p), combinedWith });
       continue;
     }
 
@@ -475,6 +498,7 @@ function buildScheduleData(csvText, group, target, opts = {}) {
     room: e.room || '',
     teacher: e.teacher || '',
     line: e.line,
+    combinedWith: e.combinedWith || [],
   }));
   return { ...meta, mode: 'group', note: null, rows };
 }

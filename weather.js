@@ -76,11 +76,11 @@ async function geocode(name) {
 // Почасовой прогноз на сегодня
 // ---------------------------------------------------------------------------
 
-async function fetchHourly(lat, lon) {
+async function fetchHourly(lat, lon, days) {
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
     '&hourly=temperature_2m,apparent_temperature,weather_code' +
-    `&forecast_days=1&timezone=${encodeURIComponent(cfg.timezone)}`;
+    `&forecast_days=${days}&timezone=${encodeURIComponent(cfg.timezone)}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.min(cfg.httpTimeout, 10 * 1000));
   try {
@@ -90,6 +90,7 @@ async function fetchHourly(lat, lon) {
     const h = j && j.hourly;
     if (!h || !Array.isArray(h.time) || !Array.isArray(h.temperature_2m)) throw new Error('ответ без hourly');
     return h.time.map((t, i) => ({
+      date: String(t).slice(0, 10),
       hhmm: String(t).slice(11, 16),
       temp: h.temperature_2m[i],
       feels: Array.isArray(h.apparent_temperature) ? h.apparent_temperature[i] : h.temperature_2m[i],
@@ -138,25 +139,39 @@ function adviceLines(hours) {
   return lines;
 }
 
-const _dayCache = new Map(); // "lat,lon" -> { at, data }
+const FORECAST_DAYS = 7; // горизонт для листания дат в /start → 🌤 Погода
 
-/**
- * Прогноз на остаток сегодняшнего дня: { ranges: [{label, icon, temp}], advice: [строки] }.
- * @returns {Promise<{ranges: Array, advice: string[]}>}
- */
-async function dayForecast(lat, lon, { maxAgeMs = 10 * 60 * 1000 } = {}) {
+const _hourlyCache = new Map(); // "lat,lon" -> { at, hours }
+
+async function fetchHourlyCached(lat, lon, maxAgeMs) {
   const key = `${Number(lat).toFixed(3)},${Number(lon).toFixed(3)}`;
-  const hit = _dayCache.get(key);
-  if (hit && Date.now() - hit.at < maxAgeMs) return hit.data;
-
-  const all = await fetchHourly(lat, lon);
-  const now = D.tzNow();
-  const nowHHMM = `${D.pad(now.h)}:00`;
-  const rest = all.filter((h) => h.hhmm >= nowHHMM);
-  const hours = rest.length ? rest : all;
-  const data = { ranges: mergeRanges(hours), advice: adviceLines(hours) };
-  _dayCache.set(key, { at: Date.now(), data });
-  return data;
+  const hit = _hourlyCache.get(key);
+  if (hit && Date.now() - hit.at < maxAgeMs) return hit.hours;
+  const hours = await fetchHourly(lat, lon, FORECAST_DAYS);
+  _hourlyCache.set(key, { at: Date.now(), hours });
+  return hours;
 }
 
-module.exports = { geocode, dayForecast };
+/**
+ * Прогноз на день targetIso (по умолчанию — остаток сегодняшнего дня):
+ * { ranges: [{label, icon, temp}], advice: [строки] }.
+ * @returns {Promise<{ranges: Array, advice: string[]}>}
+ */
+async function dayForecast(lat, lon, targetIso, { maxAgeMs = 10 * 60 * 1000 } = {}) {
+  const all = await fetchHourlyCached(lat, lon, maxAgeMs);
+  const todayIso = D.iso(D.todayParts());
+  const iso = targetIso || todayIso;
+
+  let hours = all.filter((h) => h.date === iso);
+  if (iso === todayIso) {
+    const now = D.tzNow();
+    const nowHHMM = `${D.pad(now.h)}:00`;
+    const rest = hours.filter((h) => h.hhmm >= nowHHMM);
+    if (rest.length) hours = rest;
+  }
+  if (!hours.length) hours = all; // день вне горизонта прогноза — лучше приблизительно, чем ничего
+
+  return { ranges: mergeRanges(hours), advice: adviceLines(hours) };
+}
+
+module.exports = { geocode, dayForecast, FORECAST_DAYS };

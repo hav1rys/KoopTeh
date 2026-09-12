@@ -141,7 +141,8 @@ function renderScheduleImage(data) {
       ctx.fillText(fit(ctx, subj, W - tx - padX - 10), tx, y + 25);
       ctx.fillStyle = CL.dim;
       ctx.font = `400 13px ${F}`;
-      const meta = [r.teacher, r.room && `ауд. ${r.room}`].filter(Boolean).join('    ');
+      const combined = r.combinedWith && r.combinedWith.length ? `совм. с ${r.combinedWith.join(', ')}` : null;
+      const meta = [r.teacher, r.room && `ауд. ${r.room}`, combined].filter(Boolean).join('    ');
       ctx.fillText(fit(ctx, meta, W - tx - padX - 10), tx, y + 46);
     }
     y += rowH + gap;

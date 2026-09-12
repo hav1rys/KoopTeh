@@ -116,6 +116,11 @@ function buildMenu(s, extras = {}) {
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('menu:ask').setLabel('❓ Задать вопрос').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('menu:help').setLabel('ℹ️ Помощь').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('menu:weather')
+      .setLabel('🌤 Погода')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!cfg.weatherEnabled),
     new ButtonBuilder().setCustomId('menu:refresh').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
   );
   if (extras.showBus) {
@@ -371,29 +376,63 @@ function awayStopModal(current) {
 
 // ---- Погода: сообщение (эмбед / текст / картинка) и расписание автобуса ----
 
-function buildWeatherMessage(place, forecast, format) {
+function buildWeatherMessage(place, forecast, format, dateLabel) {
+  const title = `🌤 Погода — ${place}${dateLabel ? ` · ${dateLabel}` : ''}`;
   const advice = forecast.advice || [];
   const body = (forecast.ranges || [])
     .map((r) => `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`)
     .join('\n');
 
   if (format === 'image') {
-    const buf = render.available() ? render.renderWeatherImage(place, forecast) : null;
+    const buf = render.available() ? render.renderWeatherImage(`${place}${dateLabel ? ` · ${dateLabel}` : ''}`, forecast) : null;
     if (buf) return { content: '', embeds: [], files: [{ attachment: buf, name: 'pogoda.png' }] };
     // нет canvas — откат на эмбед
   }
   if (format === 'text') {
-    const lines = [`**🌤 Погода — ${place}**`];
+    const lines = [`**${title}**`];
     if (advice.length) lines.push(advice.join('\n'));
     lines.push('', body || 'нет данных');
     return { content: lines.join('\n').slice(0, 1990), embeds: [], files: [] };
   }
   const embed = new EmbedBuilder()
     .setColor(C.weekday)
-    .setTitle(`🌤 Погода — ${place}`)
-    .addFields({ name: 'Прогноз на сегодня', value: clip(body || 'нет данных') });
+    .setTitle(title)
+    .addFields({ name: 'Прогноз', value: clip(body || 'нет данных') });
   if (advice.length) embed.setDescription(advice.join('\n'));
   return { content: '', embeds: [embed], files: [] };
+}
+
+/**
+ * Панель погоды с листанием дат (◀ Сегодня Завтра ▶) — дом (если задан) + город
+ * в одном сообщении, оба в выбранном формате.
+ */
+function buildWeatherPanel(homeInfo, cityInfo, format, isoStr, dateLabel) {
+  const todayIso = D.iso(D.todayParts());
+  const tomIso = D.iso(D.tomorrowParts());
+  const horizonIso = D.iso(D.shiftParts(D.todayParts(), 6));
+  const nav = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`weather:prev:${isoStr}`).setLabel('◀').setStyle(ButtonStyle.Secondary).setDisabled(isoStr === todayIso),
+    new ButtonBuilder().setCustomId('weather:jump:today').setLabel('Сегодня').setStyle(ButtonStyle.Secondary).setDisabled(isoStr === todayIso),
+    new ButtonBuilder().setCustomId('weather:jump:tomorrow').setLabel('Завтра').setStyle(ButtonStyle.Secondary).setDisabled(isoStr === tomIso),
+    new ButtonBuilder().setCustomId(`weather:next:${isoStr}`).setLabel('▶').setStyle(ButtonStyle.Secondary).setDisabled(isoStr >= horizonIso),
+  );
+
+  const parts = [];
+  if (homeInfo) parts.push(buildWeatherMessage(homeInfo.place, homeInfo.forecast, format, dateLabel));
+  parts.push(buildWeatherMessage(cityInfo.place, cityInfo.forecast, format, dateLabel));
+
+  return {
+    content: parts.map((p) => p.content).filter(Boolean).join('\n\n').slice(0, 1990),
+    embeds: parts.flatMap((p) => p.embeds || []),
+    files: parts.flatMap((p) => p.files || []),
+    components: [
+      nav,
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('menu:weather').setLabel('🔄 Обновить').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('menu:refresh').setLabel('← В меню').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
 }
 
 /**
@@ -681,7 +720,8 @@ function scheduleEmbed(data, humanUrl, theme) {
     const cur = i === curIdx;
     const w = (t) => (cur ? `**${t}**` : t);
     const subj = r.subject || '—';
-    col1.push(w(`${cur ? '▸ ' : '• '}${timeCol(r)}`));
+    const timeLabel = r.combinedWith && r.combinedWith.length ? `${timeCol(r)} / ${r.combinedWith.join(', ')}` : timeCol(r);
+    col1.push(w(`${cur ? '▸ ' : '• '}${timeLabel}`));
     if (mode === 'search') {
       col2.push(w(subj));
       col3.push(w([r.room && `каб. ${r.room}`, r.groupsText, r.teacher].filter(Boolean).join(' · ') || '—'));
@@ -766,6 +806,7 @@ function scheduleTextRich(data, humanUrl) {
       if (r.teacher) lines.push(`**Преподаватель:** ${r.teacher}`);
       if (mode === 'search') lines.push(`**Группа:** ${r.groupsText || '—'}`);
     }
+    if (r.combinedWith && r.combinedWith.length) lines.push(`**Совмещённая группа:** ${r.combinedWith.join(', ')}`);
   }
 
   const cd = countdownParts(data);
@@ -1668,6 +1709,7 @@ module.exports = {
   awayPlaceModal,
   awayStopModal,
   buildWeatherMessage,
+  buildWeatherPanel,
   buildBusView,
   nextFormat,
   nextTheme,

@@ -37,6 +37,42 @@ function log(level, msg) {
   else console.log(line);
 }
 
+// ---------------------------------------------------------- подробный лог в канал
+
+/** Пишет строку в служебный канал на сервере (см. cfg.logChannelId). Best-effort, не мешает основной логике. */
+async function logToChannel(text) {
+  if (!cfg.logChannelId) return;
+  try {
+    const channel = await client.channels.fetch(cfg.logChannelId);
+    if (channel && channel.isTextBased()) await channel.send({ content: String(text).slice(0, 1990) });
+  } catch (err) {
+    log('WARN', `лог-канал: ${err.message}`);
+  }
+}
+
+const tag = (uid) => `<@${uid}> (\`${uid}\`)`;
+
+/** Логирует конкретный показанный пользователю текст расписания целиком. */
+async function logSchedule(uid, action, data) {
+  if (!data) return;
+  let text;
+  try {
+    text = ss.scheduleText(data);
+  } catch {
+    text = '(не удалось сформировать текст расписания)';
+  }
+  await logToChannel(`📋 ${tag(uid)} — ${action}\n\`\`\`\n${text.slice(0, 1500)}\n\`\`\``);
+}
+
+/** Ставит группу и логирует «зарегистрировался» (не было группы) / «сменил группу» (была другая). */
+async function applyGroupChange(uid, newGroupRaw) {
+  const old = storage.get(uid).group;
+  storage.setGroup(uid, newGroupRaw);
+  const now = storage.get(uid).group;
+  if (!old) await logToChannel(`🆕 ${tag(uid)} зарегистрировался — группа **${now}**`);
+  else if (old !== now) await logToChannel(`🔄 ${tag(uid)} сменил группу: **${old}** → **${now}**`);
+}
+
 // -------------------------------------------------------------- вспомогательное
 
 /** Что показывать пользователю: его группа или его пары как преподавателя. */
@@ -176,6 +212,7 @@ async function renderSchedule(interaction, uid, target) {
   const { data, url, error } = await safeSchedule(s.subj, target, s.showGaps);
   const withNotes = data ? attachNotes(data, uid, D.iso(target)) : data;
   await interaction.editReply(menu.buildScheduleView(withNotes, D.iso(target), url, error, s.format, s.theme));
+  await logSchedule(uid, `открыл расписание (кнопка) на ${D.fmtDM(target)} (${D.weekdayRu(target)})`, withNotes);
 }
 
 /** Снимок расписания отдельным сообщением. */
@@ -188,6 +225,7 @@ async function sendScheduleSnapshot(interaction, subj, target, showGaps, format,
   }
   const d = uid ? attachNotes(data, uid, D.iso(target)) : data;
   await interaction.editReply(menu.scheduleMessage(d, url, format, theme));
+  await logSchedule(interaction.user.id, `запросил расписание отдельным сообщением на ${D.fmtDM(target)} (${D.weekdayRu(target)})`, d);
 }
 
 // -------- поиск / преподаватель (разовый просмотр с навигацией по датам) ------
@@ -214,6 +252,8 @@ async function showLookup(interaction, uid, kind, params, target, { fresh = fals
   try {
     const { data, humanUrl } = await runLookup(kind, params, target);
     view = menu.buildLookupView(data, humanUrl, s.format, undefined, s.theme);
+    const label = kind === 'teacher' ? `поиск преподавателя «${params.surname}»` : 'поиск по кабинету/преподавателю';
+    await logSchedule(uid, `${label} на ${D.fmtDM(target)} (${D.weekdayRu(target)})`, data);
   } catch (err) {
     const msg = err instanceof ss.NotPublishedError ? notPublishedText(target) : 'Не удалось выполнить поиск, попробуй позже.';
     if (!(err instanceof ss.NotPublishedError)) log('WARN', `lookup ${kind}: ${err.message}`);
@@ -245,8 +285,14 @@ async function loadBusData(uid, s, force = false) {
   if (!force && hit && Date.now() - hit.at < 10 * 60 * 1000) return hit;
   const opts = { stop: s.homeStop };
   const [toHomeRows, toCityRows] = await Promise.all([
-    bus.toHome(s.homePlace, opts).catch(() => []),
-    bus.toCity(s.homePlace, opts).catch(() => []),
+    bus.toHome(s.homePlace, opts).catch((err) => {
+      log('WARN', `автобус (домой, ${uid}): ${err.message}`);
+      return [];
+    }),
+    bus.toCity(s.homePlace, opts).catch((err) => {
+      log('WARN', `автобус (в город, ${uid}): ${err.message}`);
+      return [];
+    }),
   ]);
   const data = {
     at: Date.now(),
@@ -418,6 +464,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('pause:')) return await onPauseButton(interaction);
       if (id.startsWith('away:')) return await onAwayButton(interaction);
       if (id.startsWith('bus:')) return await onBusButton(interaction);
+      if (id.startsWith('weather:')) return await onWeatherButton(interaction);
       if (id.startsWith('days:')) return await onDaysButton(interaction);
       if (id.startsWith('rem:')) return await onReminderButton(interaction);
       if (id.startsWith('mrn:')) return await onMorningButton(interaction);
@@ -508,6 +555,7 @@ async function onSlash(interaction) {
       /* нет данных */
     }
     await deliver(interaction, menu.buildNowMessage(data, s.subj.name));
+    await logSchedule(uid, `/сейчас (${s.subj.name})`, data);
     return;
   }
 
@@ -524,6 +572,7 @@ async function onSlash(interaction) {
     // заметки — только для «своей» группы (без параметра «группа»)
     const d = data && !grpParam ? attachNotes(data, uid, D.iso(target)) : data;
     await deliver(interaction, error ? { content: error, embeds: [] } : menu.scheduleMessage(d, url, s.format, s.theme));
+    await logSchedule(uid, `/расписание ${subj.name} на ${D.fmtDM(target)} (${D.weekdayRu(target)})`, d);
     return;
   }
 
@@ -546,6 +595,7 @@ async function onSlash(interaction) {
         /* нет данных */
       }
       await deliver(interaction, menu.buildNowMessage(data, grpParam));
+      await logSchedule(uid, `/поиск группа:${grpParam} (что сейчас)`, data);
       return;
     }
 
@@ -556,14 +606,18 @@ async function onSlash(interaction) {
         return void (await interaction.reply({ content: 'Укажи группу параметром или сохрани её через /start.', ...eph }));
       }
       await interaction.deferReply(eph);
-      await deliver(interaction, { content: await findNextSubject(g, subject, target) });
+      const answer = await findNextSubject(g, subject, target);
+      await deliver(interaction, { content: answer });
+      await logToChannel(`📋 ${tag(uid)} — /поиск предмет:${subject} (группа ${g})\n\`\`\`\n${answer.slice(0, 1500)}\n\`\`\``);
       return;
     }
 
     // «Свободен ли кабинет/преподаватель на N паре»
     if (pairNo && (room || teacher)) {
       await interaction.deferReply(eph);
-      await deliver(interaction, { content: await pairAvailability({ room, teacher }, pairNo, target) });
+      const answer = await pairAvailability({ room, teacher }, pairNo, target);
+      await deliver(interaction, { content: answer });
+      await logToChannel(`📋 ${tag(uid)} — /поиск пара:${pairNo} ${room ? `кабинет:${room}` : `преподаватель:${teacher}`}\n\`\`\`\n${answer.slice(0, 1500)}\n\`\`\``);
       return;
     }
 
@@ -656,6 +710,10 @@ async function onMenuButton(interaction) {
       if (!s.subj) return void (await interaction.reply({ content: 'Сначала укажи группу или фамилию.' }));
       await renderWeek(interaction, uid, D.mondayOf(D.todayParts()));
       return;
+    case 'weather':
+      await interaction.update({ content: '⏳ Гружу погоду…', embeds: [], components: [] });
+      await renderWeatherView(interaction, uid, D.iso(D.todayParts()));
+      return;
     case 'role':
       await interaction.update(menu.buildRoleView(s));
       return;
@@ -668,6 +726,7 @@ async function onMenuButton(interaction) {
       return;
     case 'togglesub':
       storage.setSubscribed(uid, !s.subscribed);
+      await logToChannel(`🔔 ${tag(uid)} ${!s.subscribed ? 'включил' : 'выключил'} рассылку`);
       await interaction.update(menuView(uid));
       return;
     case 'time':
@@ -748,7 +807,7 @@ async function onGroupButton(interaction) {
 
 async function onGroupSelect(interaction) {
   const uid = interaction.user.id;
-  storage.setGroup(uid, interaction.values[0]);
+  await applyGroupChange(uid, interaction.values[0]);
   log('INFO', `${uid} выбрал группу "${interaction.values[0]}"`);
   await interaction.update(menuView(uid));
 }
@@ -832,10 +891,16 @@ async function onLookupButton(interaction) {
 
   if (rest === 'pin') {
     if (st.kind !== 'teacher' || !st.params.surname) return;
+    const hadTeacherName = storage.get(uid).teacherName;
     storage.setTeacherName(uid, st.params.surname);
     storage.setRole(uid, 'teacher');
     if (!storage.get(uid).subscribed) storage.setSubscribed(uid, true);
     log('INFO', `${uid} закрепил режим преподавателя: ${st.params.surname}`);
+    await logToChannel(
+      hadTeacherName
+        ? `🔄 ${tag(uid)} сменил фамилию преподавателя: **${hadTeacherName}** → **${st.params.surname}** (закреплено через поиск)`
+        : `🆕 ${tag(uid)} зарегистрировался — преподаватель **${st.params.surname}** (закреплено через поиск)`,
+    );
     await interaction.update(menuView(uid));
     return;
   }
@@ -867,6 +932,7 @@ async function onRoleButton(interaction) {
       return void (await interaction.reply({ content: 'Сначала укажи группу.' }));
     }
     storage.setRole(uid, rest);
+    await logToChannel(`👤 ${tag(uid)} сменил роль на **${rest === 'teacher' ? 'преподаватель' : 'студент'}**`);
     await interaction.update(menu.buildRoleView(effState(uid)));
   }
 }
@@ -985,6 +1051,7 @@ async function onSettingsButton(interaction) {
       return void (await back());
     case 'togglesub':
       storage.setSubscribed(uid, !s.subscribed);
+      await logToChannel(`🔔 ${tag(uid)} ${!s.subscribed ? 'включил' : 'выключил'} рассылку`);
       return void (await back());
     case 'togglegaps':
       storage.setShowGaps(uid, !s.showGaps);
@@ -1042,6 +1109,17 @@ async function renderWeek(interaction, uid, mondayParts) {
   const days = await loadWeekDays(s.subj, mondayParts);
   weekState.set(uid, D.iso(mondayParts));
   await interaction.editReply(menu.buildWeekView({ days }, s.format));
+  const weekText = days
+    .map((d) => {
+      if (d.error) return `${D.fmtDM(d.parts)}: ${d.error}`;
+      try {
+        return `${D.fmtDM(d.parts)}:\n${ss.scheduleText(d.data)}`;
+      } catch {
+        return `${D.fmtDM(d.parts)}: (ошибка текста)`;
+      }
+    })
+    .join('\n\n');
+  await logToChannel(`📋 ${tag(uid)} — открыл неделю с ${D.fmtDM(mondayParts)}\n\`\`\`\n${weekText.slice(0, 1400)}\n\`\`\``);
 }
 
 async function onWeekButton(interaction) {
@@ -1070,6 +1148,46 @@ async function onWeekButton(interaction) {
   await renderWeek(interaction, uid, monday);
 }
 
+// -------- погода с листанием дат --------
+
+async function renderWeatherView(interaction, uid, targetIso) {
+  const s = effState(uid);
+  try {
+    const cityForecast = await weather.dayForecast(cfg.weatherLat, cfg.weatherLon, targetIso);
+    let homeInfo = null;
+    if (s.away && s.homePlace && s.homeLat != null && s.homeLon != null) {
+      const homeForecast = await weather.dayForecast(s.homeLat, s.homeLon, targetIso);
+      homeInfo = { place: s.homePlace, forecast: homeForecast };
+    }
+    const t = D.partsFromIso(targetIso) || D.todayParts();
+    const dateLabel = `${D.fmtDM(t)} (${D.weekdayRu(t)})`;
+    const cityInfo = { place: cfg.weatherPlace, forecast: cityForecast };
+    await interaction.editReply(menu.buildWeatherPanel(homeInfo, cityInfo, s.weatherFormat, targetIso, dateLabel));
+  } catch (err) {
+    log('WARN', `погода (панель, ${uid}): ${err.message}`);
+    await interaction.editReply({ content: 'Не удалось получить погоду, попробуй позже.', embeds: [], components: [] });
+  }
+}
+
+async function onWeatherButton(interaction) {
+  const uid = interaction.user.id;
+  const rest = interaction.customId.slice('weather:'.length);
+  let target = null;
+  if (rest === 'jump:today') target = D.todayParts();
+  else if (rest === 'jump:tomorrow') target = D.tomorrowParts();
+  else if (rest.startsWith('prev:') || rest.startsWith('next:')) {
+    const b = D.partsFromIso(rest.slice(5));
+    if (b) target = D.shiftParts(b, rest.startsWith('prev:') ? -1 : 1);
+  }
+  if (!target) return;
+  const todayIso = D.iso(D.todayParts());
+  const horizonIso = D.iso(D.shiftParts(D.todayParts(), weather.FORECAST_DAYS - 1));
+  if (D.iso(target) < todayIso) target = D.todayParts();
+  else if (D.iso(target) > horizonIso) target = D.partsFromIso(horizonIso);
+  await interaction.update({ content: '⏳ Обновляю…', embeds: [], components: [] });
+  await renderWeatherView(interaction, uid, D.iso(target));
+}
+
 // -------- админ-панель --------
 
 async function onAdminButton(interaction) {
@@ -1087,7 +1205,10 @@ async function onAdminButton(interaction) {
   if (rest === 'schann:add') return void (await interaction.showModal(menu.schedAnnModal()));
   if (rest.startsWith('schann:del:')) {
     const sid = rest.slice('schann:del:'.length);
-    if (storage.removeScheduledAnnounce(sid)) storage.addAdminLog(uid, `удалил отложенное объявление ${sid}`);
+    if (storage.removeScheduledAnnounce(sid)) {
+      storage.addAdminLog(uid, `удалил отложенное объявление ${sid}`);
+      await logToChannel(`🛠 ${tag(uid)} удалил отложенное объявление \`${sid}\``);
+    }
     return void (await interaction.update(menu.buildSchedAnnView(storage.listScheduledAnnounces())));
   }
   if (rest === 'admins') return void (await interaction.update(menu.buildAdminsView(storage.getAdmins(), uid)));
@@ -1101,6 +1222,7 @@ async function onAdminButton(interaction) {
     }
     log('INFO', `${uid} удалил админа ${id}`);
     storage.addAdminLog(uid, `удалил админа …${String(id).slice(-4)}`);
+    await logToChannel(`🛠 ${tag(uid)} удалил админа ${tag(id)}`);
     await interaction.update(menu.buildAdminsView(storage.getAdmins(), uid));
   }
 }
@@ -1135,17 +1257,20 @@ async function onModal(interaction) {
   if (id === 'modal:setgroup') {
     const group = interaction.fields.getTextInputValue('group').trim();
     if (!group) return void (await interaction.reply({ content: 'Пустое название группы.' }));
-    storage.setGroup(uid, group);
+    await applyGroupChange(uid, group);
     log('INFO', `${uid} ввёл группу "${group}"`);
     return void (await sendMenu(interaction, uid));
   }
 
   if (id === 'modal:setteacher') {
     const surname = interaction.fields.getTextInputValue('surname').trim();
+    const hadTeacherName = storage.get(uid).teacherName;
     storage.setTeacherName(uid, surname || null);
     if (surname) storage.setRole(uid, 'teacher');
     else if (storage.get(uid).role === 'teacher') storage.setRole(uid, 'student');
     log('INFO', `${uid} режим преподавателя: "${surname || '—'}"`);
+    if (surname && !hadTeacherName) await logToChannel(`🆕 ${tag(uid)} зарегистрировался — преподаватель **${surname}**`);
+    else if (surname && hadTeacherName !== surname) await logToChannel(`🔄 ${tag(uid)} сменил фамилию преподавателя: **${hadTeacherName}** → **${surname}**`);
     const view = menu.buildRoleView(effState(uid));
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
     else await interaction.reply(view);
@@ -1359,6 +1484,9 @@ async function onModal(interaction) {
     const { ok, fail, total } = await broadcastAnnouncement(text, group);
     log('INFO', `объявление от ${uid}${group ? ` (${group})` : ''}: доставлено ${ok}/${total}`);
     storage.addAdminLog(uid, `объявление ${group ? `группе ${group}` : 'всем'} (${ok}/${total})`);
+    await logToChannel(
+      `📢 ${tag(uid)} разослал объявление${group ? ` группе **${group}**` : ' всем подписчикам'} (доставлено ${ok}/${total})\n\`\`\`\n${text.slice(0, 1200)}\n\`\`\``,
+    );
     try {
       await interaction.followUp({ content: `Готово: доставлено ${ok} из ${total}, не доставлено ${fail}.` });
     } catch {
@@ -1396,6 +1524,9 @@ async function onModal(interaction) {
     const sid = storage.addScheduledAnnounce({ text, atIso, atHHMM, group: group || null, by: uid });
     storage.addAdminLog(uid, `запланировал объявление ${sid} на ${atIso} ${atHHMM}${group ? ` (${group})` : ''}`);
     log('INFO', `${uid} запланировал объявление ${sid} на ${atIso} ${atHHMM}`);
+    await logToChannel(
+      `🕓 ${tag(uid)} запланировал объявление \`${sid}\` на ${atIso} ${atHHMM}${group ? ` (группа ${group})` : ' (всем)'}\n\`\`\`\n${text.slice(0, 1200)}\n\`\`\``,
+    );
     const view = menu.buildSchedAnnView(storage.listScheduledAnnounces());
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
     else await interaction.reply(view);
@@ -1408,7 +1539,10 @@ async function onModal(interaction) {
     if (!/^\d{15,20}$/.test(newId)) return void (await interaction.reply({ content: 'Это не похоже на Discord ID.' }));
     const added = storage.addAdmin(newId);
     log('INFO', `${uid} добавил админа ${newId} (${added ? 'ok' : 'уже был'})`);
-    if (added) storage.addAdminLog(uid, `добавил админа …${newId.slice(-4)}`);
+    if (added) {
+      storage.addAdminLog(uid, `добавил админа …${newId.slice(-4)}`);
+      await logToChannel(`🛠 ${tag(uid)} добавил админа ${tag(newId)}`);
+    }
     const view = menu.buildAdminsView(storage.getAdmins(), uid);
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
     else await interaction.reply(view);
@@ -1512,6 +1646,9 @@ async function announceTick() {
     const { ok, fail, total } = await broadcastAnnouncement(a.text, a.group);
     log('INFO', `отложенное объявление ${a.id}: доставлено ${ok}/${total}, не доставлено ${fail}`);
     storage.addAdminLog(a.by || 'система', `отложенное объявление ${a.id} отправлено (${ok}/${total})`);
+    await logToChannel(
+      `🕓✅ Отложенное объявление \`${a.id}\` (запланировал ${a.by ? tag(a.by) : 'система'}) отправлено${a.group ? ` группе **${a.group}**` : ' всем'} (доставлено ${ok}/${total})\n\`\`\`\n${String(a.text).slice(0, 1200)}\n\`\`\``,
+    );
     if (a.by) {
       try {
         const admin = await client.users.fetch(a.by);
@@ -1756,6 +1893,9 @@ async function runBroadcast(due, target, targetIso) {
     await new Promise((r) => setTimeout(r, 1200));
   }
   log('INFO', `рассылка завершена: отправлено ${sent}, пропущено ${skipped}, отложено ${deferredCount}`);
+  await logToChannel(
+    `📨 Ежедневная рассылка на ${D.fmtDM(target)} (${D.weekdayRu(target)}): получателей ${due.length}, отправлено ${sent}, пропущено ${skipped}, отложено ${deferredCount}`,
+  );
 }
 
 // -------- напоминания за N минут до пары (проверка раз в минуту) --------
