@@ -24,7 +24,12 @@ const cfg = require('./config');
 
 class UnavailableError extends Error {}
 
-const UA = 'KoopTehScheduleBot/1.0 (+Discord schedule bot; bus lookup)';
+// Обычный браузерный UA — с самодельным (KoopTehScheduleBot/1.0) Яндекс отдавал
+// страницу без window.INITIAL_STATE (видимо, урезанную версию для нераспознанных
+// клиентов). Страница публичная, доступна любому браузеру без авторизации —
+// это просто чтобы получить тот же ответ, что видит обычный посетитель.
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
 const CITY = 'Петрозаводск';
 const AVOKZAL_SLUG = 'petrozavodsk-av';
 
@@ -35,7 +40,11 @@ async function httpGet(url) {
     const res = await fetch(url, {
       redirect: 'follow',
       signal: ctrl.signal,
-      headers: { 'User-Agent': UA, Accept: 'text/html' },
+      headers: {
+        'User-Agent': UA,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+      },
     });
     if (!res.ok) throw new UnavailableError(`HTTP ${res.status}`);
     return await res.text();
@@ -70,7 +79,11 @@ function resolveStopNames(place, rawStop) {
 function extractInitialState(html) {
   const marker = 'window.INITIAL_STATE = ';
   const at = html.indexOf(marker);
-  if (at < 0) throw new UnavailableError('не нашёл INITIAL_STATE на странице (вёрстка Яндекса могла измениться)');
+  if (at < 0) {
+    const titleM = /<title[^>]*>([^<]*)<\/title>/i.exec(html);
+    const hint = titleM ? `title: "${titleM[1].trim()}"` : `начало: "${String(html).slice(0, 120).replace(/\s+/g, ' ')}"`;
+    throw new UnavailableError(`не нашёл INITIAL_STATE на странице (${html.length} байт, ${hint})`);
+  }
   let i = at + marker.length;
   if (html[i] !== '{') throw new UnavailableError('неожиданный формат INITIAL_STATE');
   const start = i;

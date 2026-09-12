@@ -9,6 +9,7 @@ const {
   SlashCommandBuilder,
   ApplicationIntegrationType,
   InteractionContextType,
+  EmbedBuilder,
 } = require('discord.js');
 
 const cfg = require('./config');
@@ -40,11 +41,37 @@ function log(level, msg) {
 // ---------------------------------------------------------- подробный лог в канал
 
 /** Пишет строку в служебный канал на сервере (см. cfg.logChannelId). Best-effort, не мешает основной логике. */
+// Цвет эмбеда лога — по эмодзи в начале первой строки (не нужно менять сигнатуру
+// на всех ~20 местах вызова, достаточно один раз поправить сам logToChannel).
+const LOG_COLOR_BY_EMOJI = [
+  ['🆕', 0x2f9e44], // регистрация
+  ['🔄', 0x2b6cb0], // смена группы/фамилии
+  ['👤', 0x2b6cb0], // роль
+  ['🔔', 0x1098ad], // подписка
+  ['📢', 0xd9a441], // объявление
+  ['🕓', 0xd9a441], // отложенное объявление
+  ['🛠', 0xd9a441], // админ
+  ['📨', 0x7048e8], // ежедневная рассылка
+  ['📋', 0x495057], // запросы расписания
+  ['🚀', 0x5865f2], // запуск
+  ['🛑', 0xe03131], // остановка
+  ['⚠️', 0xe03131], // ошибки/алерты
+];
+
+/** Пишет красивый эмбед в служебный канал (см. cfg.logChannelId). Best-effort, не мешает основной логике. */
 async function logToChannel(text) {
   if (!cfg.logChannelId) return;
   try {
     const channel = await client.channels.fetch(cfg.logChannelId);
-    if (channel && channel.isTextBased()) await channel.send({ content: String(text).slice(0, 1990) });
+    if (!channel || !channel.isTextBased()) return;
+    const str = String(text);
+    const firstLine = str.split('\n')[0] || '';
+    const match = LOG_COLOR_BY_EMOJI.find(([emoji]) => firstLine.startsWith(emoji));
+    const embed = new EmbedBuilder()
+      .setColor(match ? match[1] : 0x5865f2)
+      .setDescription(str.slice(0, 4000))
+      .setTimestamp(Date.now());
+    await channel.send({ embeds: [embed] });
   } catch (err) {
     log('WARN', `лог-канал: ${err.message}`);
   }
@@ -343,6 +370,7 @@ client.once(Events.ClientReady, async (c) => {
   await registerCommands(c);
   startSchedulers();
   startPresence(c);
+  await logToChannel(`🚀 Бот запущен — ${c.user.tag}`);
 });
 
 const ACT_TYPES = {
@@ -2079,7 +2107,24 @@ async function healthTick() {
 // --------------------------------------------------------------------
 
 process.on('unhandledRejection', (reason) => {
-  log('ERROR', `unhandledRejection: ${reason && reason.stack ? reason.stack : reason}`);
+  const msg = reason && reason.stack ? reason.stack : String(reason);
+  log('ERROR', `unhandledRejection: ${msg}`);
+  logToChannel(`⚠️ Необработанная ошибка (unhandledRejection):\n\`\`\`\n${msg.slice(0, 1500)}\n\`\`\``).catch(() => {});
 });
+
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log('INFO', `получен ${signal}, останавливаюсь`);
+  try {
+    await logToChannel(`🛑 Бот останавливается (${signal})`);
+  } catch {
+    /* ignore */
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 client.login(cfg.token);
