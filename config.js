@@ -99,6 +99,13 @@ module.exports = {
   yandexCityCode: (process.env.YANDEX_CITY_CODE || 'c18').trim(),
   yandexHomeCode: (process.env.YANDEX_HOME_CODE || 'c85997').trim(),
 
+  // Telegram-бот — отдельный процесс (npm run telegram / telegramBot.js), запускается
+  // как отдельный сервис BotHost со своим DATA_FILE/DATA_DIR (см. README) — чтобы не
+  // писать в тот же users.json из двух процессов одновременно.
+  telegramToken: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
+  telegramAdminId: (process.env.TELEGRAM_ADMIN_ID || '').trim(),
+  telegramLogChatId: (process.env.TELEGRAM_LOG_CHAT_ID || '').trim(),
+
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
   // секунды -> мс, но не больше 60 с на запрос (защита от опечаток вроде "300000")
