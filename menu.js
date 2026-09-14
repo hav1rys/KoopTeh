@@ -301,9 +301,66 @@ function buildSettingsView(s) {
     new ButtonBuilder().setCustomId('set:wthrformat').setLabel(`Погода: ${fmtLabel(s.weatherFormat)}`).setStyle(ButtonStyle.Secondary),
   );
   const row4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('set:link').setLabel('🔗 Связать с Telegram/VK').setStyle(ButtonStyle.Secondary),
+  );
+  const row5 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('set:back').setLabel('← В меню').setStyle(ButtonStyle.Primary),
   );
-  return { content: '', embeds: [embed], files: [], components: [row1, row2, row3, row4] };
+  return { content: '', embeds: [embed], files: [], components: [row1, row2, row3, row4, row5] };
+}
+
+// ---- Связывание аккаунтов между площадками ---------------------------
+
+const PLATFORM_LABEL = (id) => (String(id).startsWith('tg:') ? 'Telegram' : String(id).startsWith('vk:') ? 'VK' : 'Discord');
+
+/** linkedIds — результат storage.linkedIds(uid). extras: {code, error}. */
+function buildLinkView(linkedIds, extras = {}) {
+  const lines = [
+    'Один и тот же профиль (группа, рассылка, настройки) можно открыть из Discord, Telegram и VK — если их связать.',
+    '',
+  ];
+  lines.push(
+    linkedIds.length > 1
+      ? `Сейчас привязаны: **${linkedIds.map(PLATFORM_LABEL).join(', ')}**.`
+      : 'Пока ничего не привязано — это отдельный профиль.',
+  );
+  if (extras.code) lines.push(`\n📎 Код: \`${extras.code}\`\nВведи его в другом мессенджере (там тоже есть кнопка «🔗 Связать») в течение 10 минут.`);
+  if (extras.error === 'not-found') lines.push('\n⚠️ Код не найден или уже истёк (действует 10 минут).');
+  else if (extras.error === 'same') lines.push('\n⚠️ Это и так один и тот же профиль.');
+  else if (extras.error === 'has-profile') {
+    lines.push('\n⚠️ У этого аккаунта уже есть своя группа/фамилия — привязка стёрла бы её. Если это ошибочный профиль, сначала сбрось группу в настройках, потом повтори.');
+  } else if (extras.error === 'is-root') {
+    lines.push('\n⚠️ Этот аккаунт — основной профиль (к нему привязаны другие мессенджеры). Чтобы отвязать конкретный мессенджер, открой его и нажми «✂️ Отвязать» там.');
+  }
+  const embed = new EmbedBuilder().setColor(C.weekday).setTitle('🔗 Связь с другими мессенджерами').setDescription(lines.join('\n'));
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('link:code').setLabel('📎 Получить код').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('link:enter').setLabel('⌨️ Ввести код').setStyle(ButtonStyle.Secondary),
+  );
+  const rows = [row1];
+  if (linkedIds.length > 1) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('link:unlink').setLabel('✂️ Отвязать этот аккаунт').setStyle(ButtonStyle.Danger),
+      ),
+    );
+  }
+  rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('set:back').setLabel('← Назад').setStyle(ButtonStyle.Secondary)));
+  return { content: '', embeds: [embed], files: [], components: rows };
+}
+
+/** Модалка ввода кода привязки. */
+function linkCodeModal() {
+  const modal = new ModalBuilder().setCustomId('modal:link').setTitle('Код привязки');
+  const input = new TextInputBuilder()
+    .setCustomId('code')
+    .setLabel('Код из другого мессенджера')
+    .setStyle(TextInputStyle.Short)
+    .setMinLength(6)
+    .setMaxLength(6)
+    .setRequired(true);
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return modal;
 }
 
 // ---- «Я не из города» — домашние погода и автобус -------------------
@@ -1702,6 +1759,8 @@ module.exports = {
   buildDaysView,
   buildReminderView,
   buildSettingsView,
+  buildLinkView,
+  linkCodeModal,
   buildHelpView,
   buildPauseView,
   pauseDateModal,

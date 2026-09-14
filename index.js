@@ -347,7 +347,7 @@ async function renderBusView(interaction, uid, targetIso, force = false) {
 }
 
 async function onBusButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('bus:'.length);
   let target = null;
   if (rest === 'jump:today') target = D.todayParts();
@@ -491,6 +491,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id.startsWith('set:')) return await onSettingsButton(interaction);
       if (id.startsWith('pause:')) return await onPauseButton(interaction);
       if (id.startsWith('away:')) return await onAwayButton(interaction);
+      if (id.startsWith('link:')) return await onLinkButton(interaction);
       if (id.startsWith('bus:')) return await onBusButton(interaction);
       if (id.startsWith('weather:')) return await onWeatherButton(interaction);
       if (id.startsWith('days:')) return await onDaysButton(interaction);
@@ -532,7 +533,7 @@ async function onAutocomplete(interaction) {
 }
 
 async function onSlash(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const name = interaction.commandName;
   const eph = interaction.inGuild() ? { flags: MessageFlags.Ephemeral } : {};
 
@@ -710,7 +711,7 @@ async function pairAvailability({ room, teacher }, pairNo, target) {
 
 async function onMenuButton(interaction) {
   const action = interaction.customId.slice('menu:'.length);
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const s = effState(uid);
 
   switch (action) {
@@ -813,7 +814,7 @@ async function onMenuButton(interaction) {
 }
 
 async function onGroupButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('grp:'.length);
 
   if (rest === 'cancel') return void (await interaction.update(menuView(uid)));
@@ -834,14 +835,14 @@ async function onGroupButton(interaction) {
 }
 
 async function onGroupSelect(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   await applyGroupChange(uid, interaction.values[0]);
   log('INFO', `${uid} выбрал группу "${interaction.values[0]}"`);
   await interaction.update(menuView(uid));
 }
 
 async function onScheduleButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('sch:'.length);
   const s = effState(uid);
 
@@ -907,7 +908,7 @@ async function onScheduleButton(interaction) {
 }
 
 async function onLookupButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('lk:'.length);
   if (rest === 'menu') return void (await interaction.update(menuView(uid)));
 
@@ -944,7 +945,7 @@ async function onLookupButton(interaction) {
 }
 
 async function onRoleButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('role:'.length);
   if (rest === 'done') return void (await interaction.update(menuView(uid)));
   if (rest === 'setname') {
@@ -966,7 +967,7 @@ async function onRoleButton(interaction) {
 }
 
 async function onPauseButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('pause:'.length);
 
   if (rest === 'back') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
@@ -987,7 +988,7 @@ async function onPauseButton(interaction) {
 }
 
 async function onAwayButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('away:'.length);
 
   if (rest === 'back') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
@@ -1004,7 +1005,7 @@ async function onAwayButton(interaction) {
 }
 
 async function onDaysButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('days:'.length);
   if (rest === 'done') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
   if (rest.startsWith('toggle:')) {
@@ -1019,7 +1020,7 @@ async function onDaysButton(interaction) {
 }
 
 async function onReminderButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('rem:'.length);
   if (rest === 'done') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
   if (rest.startsWith('set:')) {
@@ -1031,7 +1032,7 @@ async function onReminderButton(interaction) {
 }
 
 async function onMorningButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('mrn:'.length);
   if (rest === 'done') return void (await interaction.update(menu.buildSettingsView(effState(uid))));
   if (rest === 'time') return void (await interaction.showModal(menu.morningTimeModal(effState(uid).morningTime)));
@@ -1045,7 +1046,7 @@ async function onMorningButton(interaction) {
 }
 
 async function onSettingsButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('set:'.length);
   const s = effState(uid);
   const back = () => interaction.update(menu.buildSettingsView(effState(uid)));
@@ -1074,6 +1075,8 @@ async function onSettingsButton(interaction) {
       return void (await interaction.update(menu.buildPauseView(s)));
     case 'away':
       return void (await interaction.update(menu.buildAwayView(s)));
+    case 'link':
+      return void (await interaction.update(menu.buildLinkView(storage.linkedIds(uid))));
     case 'wthrformat':
       storage.setWeatherFormat(uid, menu.nextFormat(s.weatherFormat));
       return void (await back());
@@ -1102,9 +1105,27 @@ async function onSettingsButton(interaction) {
   }
 }
 
+async function onLinkButton(interaction) {
+  const uid = storage.resolveUid(interaction.user.id);
+  const rest = interaction.customId.slice('link:'.length);
+
+  if (rest === 'code') {
+    const code = storage.createLinkCode(uid);
+    return void (await interaction.update(menu.buildLinkView(storage.linkedIds(uid), { code })));
+  }
+  if (rest === 'enter') {
+    return void (await interaction.showModal(menu.linkCodeModal()));
+  }
+  if (rest === 'unlink') {
+    const ok = storage.unlinkPlatform(interaction.user.id);
+    const freshUid = storage.resolveUid(interaction.user.id);
+    return void (await interaction.update(menu.buildLinkView(storage.linkedIds(freshUid), ok ? {} : { error: 'is-root' })));
+  }
+}
+
 async function onAnswerButton(interaction) {
   const qid = interaction.customId.slice('ans:'.length);
-  if (!storage.isAdmin(interaction.user.id)) return void (await interaction.reply({ content: 'Эта кнопка не для тебя.' }));
+  if (!storage.isAdmin(storage.resolveUid(interaction.user.id))) return void (await interaction.reply({ content: 'Эта кнопка не для тебя.' }));
   const q = storage.getQuestion(qid);
   if (!q) {
     interaction.message?.unpin?.().catch(() => {});
@@ -1151,7 +1172,7 @@ async function renderWeek(interaction, uid, mondayParts) {
 }
 
 async function onWeekButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('wk:'.length);
   if (rest === 'menu') return void (await interaction.update(menuView(uid)));
 
@@ -1198,7 +1219,7 @@ async function renderWeatherView(interaction, uid, targetIso) {
 }
 
 async function onWeatherButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('weather:'.length);
   let target = null;
   if (rest === 'jump:today') target = D.todayParts();
@@ -1219,7 +1240,7 @@ async function onWeatherButton(interaction) {
 // -------- админ-панель --------
 
 async function onAdminButton(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   if (!storage.isAdmin(uid)) return void (await interaction.reply({ content: 'Нет доступа.' }));
   const rest = interaction.customId.slice('adm:'.length);
 
@@ -1279,7 +1300,7 @@ function parseDateField(raw) {
 }
 
 async function onModal(interaction) {
-  const uid = interaction.user.id;
+  const uid = storage.resolveUid(interaction.user.id);
   const id = interaction.customId;
 
   if (id === 'modal:setgroup') {
@@ -1315,6 +1336,16 @@ async function onModal(interaction) {
       storage.setTime(uid, null);
     }
     const view = menu.buildSettingsView(effState(uid));
+    if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
+    else await interaction.reply(view);
+    return;
+  }
+
+  if (id === 'modal:link') {
+    const code = interaction.fields.getTextInputValue('code').trim();
+    const r = storage.redeemLinkCode(code, interaction.user.id);
+    const view = menu.buildLinkView(storage.linkedIds(storage.resolveUid(interaction.user.id)), r.ok ? {} : { error: r.error });
+    if (r.ok) view.content = '✅ Связано! Теперь это один профиль.';
     if (interaction.isFromMessage && interaction.isFromMessage()) await interaction.update(view);
     else await interaction.reply(view);
     return;

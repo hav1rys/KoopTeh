@@ -37,8 +37,13 @@ function log(level, msg) {
 }
 
 // Префикс, чтобы id пользователей Telegram никогда не пересеклись с Discord-id
-// в общих структурах storage (на случай, если когда-нибудь решат делить файл).
-const uid = (chatId) => `tg:${chatId}`;
+// в общих структурах storage. rawId() — истинный, непривязанный id именно этого
+// Telegram-чата (нужен только для самой операции привязки). uid() — id профиля,
+// с которым реально работает вся остальная логика: если чат привязан к другому
+// мессенджеру через /связать, это будет канонический id ТОГО профиля (и тогда
+// расписание/настройки/подписка — общие с Discord/VK-аккаунтом того же человека).
+const rawId = (chatId) => `tg:${chatId}`;
+const uid = (chatId) => storage.resolveUid(rawId(chatId));
 
 async function logToChannel(text) {
   if (!cfg.telegramLogChatId) return;
@@ -462,6 +467,7 @@ async function handleCallback(query) {
   if (prefix === 'menu') return void (await onMenuButton(chatId, messageId, rawUid, data.slice(5), ack));
   if (prefix === 'set') return void (await onSettingsButton(chatId, messageId, rawUid, data.slice(4), ack));
   if (prefix === 'away') return void (await onAwayButton(chatId, messageId, rawUid, data.slice(5), ack));
+  if (prefix === 'link') return void (await onLinkButton(chatId, messageId, rawUid, data.slice(5), ack));
   if (prefix === 'pause') return void (await onPauseButton(chatId, messageId, rawUid, data.slice(6), ack));
   if (prefix === 'role') return void (await onRoleButton(chatId, messageId, rawUid, data.slice(5), ack));
   if (prefix === 'days') return void (await onDaysButton(chatId, messageId, rawUid, data.slice(5), ack));
@@ -581,6 +587,9 @@ async function onSettingsButton(chatId, messageId, rawUid, rest, ack) {
     case 'away':
       await ack();
       return void (await render(chatId, messageId, tm.buildAwayView(s)));
+    case 'link':
+      await ack();
+      return void (await render(chatId, messageId, tm.buildLinkView(storage.linkedIds(rawUid))));
     case 'togglesub':
       storage.setSubscribed(rawUid, !s.subscribed);
       await logToChannel(`🔔 ${tag(rawUid)} ${!s.subscribed ? 'включил' : 'выключил'} рассылку`);
@@ -640,6 +649,26 @@ async function onAwayButton(chatId, messageId, rawUid, rest, ack) {
     awaiting.set(rawUid, { kind: 'awaystop' });
     await bot.sendMessage(chatId, 'Напиши номер остановки (напр. 2) или полное название (напр. «кладбище»), либо «-»:');
     return;
+  }
+  await ack();
+}
+
+async function onLinkButton(chatId, messageId, rawUid, rest, ack) {
+  if (rest === 'code') {
+    const code = storage.createLinkCode(rawUid);
+    await ack();
+    return void (await render(chatId, messageId, tm.buildLinkView(storage.linkedIds(rawUid), { code })));
+  }
+  if (rest === 'enter') {
+    await ack();
+    awaiting.set(rawUid, { kind: 'linkcode' });
+    await bot.sendMessage(chatId, 'Пришли код (6 символов), который показал бот в другом мессенджере:');
+    return;
+  }
+  if (rest === 'unlink') {
+    const ok = storage.unlinkPlatform(rawId(chatId));
+    await ack(ok ? 'Отвязано.' : undefined);
+    return void (await render(chatId, messageId, tm.buildLinkView(storage.linkedIds(uid(chatId)), ok ? {} : { error: 'is-root' })));
   }
   await ack();
 }
@@ -1193,6 +1222,12 @@ async function handleAwaitingText(chatId, rawUid, pending, text) {
       storage.setHomeStop(rawUid, text === '-' ? null : text);
       const view = tm.buildAwayView(effState(rawUid));
       await bot.sendMessage(chatId, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard } });
+      return;
+    }
+    case 'linkcode': {
+      const r = storage.redeemLinkCode(text, rawId(chatId));
+      const view = tm.buildLinkView(storage.linkedIds(uid(chatId)), r.ok ? {} : { error: r.error });
+      await bot.sendMessage(chatId, r.ok ? '✅ Связано! Теперь это один профиль.\n\n' + view.text : view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard } });
       return;
     }
     case 'ask': {

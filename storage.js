@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const cfg = require('./config');
 
 const FILE = path.resolve(cfg.dataFile);
-let data = { users: {}, questions: {}, digests: {}, admins: [] };
+let data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {} };
 
 function load() {
   let raw;
@@ -38,14 +38,18 @@ function load() {
       admins: Array.isArray(raw.admins) ? raw.admins.map(String) : [],
       scheduledAnnouncements: Array.isArray(raw.scheduledAnnouncements) ? raw.scheduledAnnouncements : [],
       adminLog: Array.isArray(raw.adminLog) ? raw.adminLog : [],
+      aliases: isObj(raw.aliases) ? raw.aliases : {},
+      linkCodes: isObj(raw.linkCodes) ? raw.linkCodes : {},
     };
   } else if (isObj(raw)) {
-    data = { users: raw, questions: {}, digests: {}, admins: [] };
+    data = { users: raw, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {} };
   } else {
-    data = { users: {}, questions: {}, digests: {}, admins: [] };
+    data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {} };
   }
   if (!Array.isArray(data.scheduledAnnouncements)) data.scheduledAnnouncements = [];
   if (!Array.isArray(data.adminLog)) data.adminLog = [];
+  if (!isObj(data.aliases)) data.aliases = {};
+  if (!isObj(data.linkCodes)) data.linkCodes = {};
   if (!data.admins.length && cfg.adminId) data.admins = [String(cfg.adminId)];
 }
 
@@ -430,6 +434,91 @@ function dueScheduledAnnounces(nowIso, nowHHMM) {
   );
 }
 
+// ---- связывание аккаунтов между площадками (Discord/Telegram/VK) ----
+//
+// Идентификатор пользователя ("сырой" id) у каждой площадки свой формат
+// (число у Discord, "tg:<chatId>" у Telegram, позже "vk:<id>" у VK). Чтобы
+// один человек мог пользоваться одним профилем из разных мессенджеров, тут
+// хранится alias-карта "сырой id -> канонический id" (id, под которым живёт
+// сам профиль в data.users). Привязка подтверждается одноразовым кодом,
+// чтобы нельзя было угнать чужой профиль, просто вписав чужой тег.
+
+const LINK_CODE_TTL_MS = 10 * 60 * 1000;
+const LINK_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // без 0/O/1/I — легче диктовать и вводить
+
+/** "Сырой" id площадки -> канонический id профиля (сам себя, если не привязан). */
+function resolveUid(rawUid) {
+  const id = String(rawUid);
+  const target = data.aliases[id];
+  return target ? String(target) : id;
+}
+
+function purgeExpiredLinkCodes() {
+  const now = Date.now();
+  let changed = false;
+  for (const [code, v] of Object.entries(data.linkCodes)) {
+    if (!v || now - v.createdAt > LINK_CODE_TTL_MS) {
+      delete data.linkCodes[code];
+      changed = true;
+    }
+  }
+  if (changed) save();
+}
+
+/** Код на 10 минут для привязки другого мессенджера к тому же профилю, что и rawUid. */
+function createLinkCode(rawUid) {
+  purgeExpiredLinkCodes();
+  const canonicalUid = resolveUid(rawUid);
+  let code;
+  do {
+    code = Array.from({ length: 6 }, () => LINK_CODE_ALPHABET[crypto.randomInt(LINK_CODE_ALPHABET.length)]).join('');
+  } while (data.linkCodes[code]);
+  data.linkCodes[code] = { canonicalUid, createdAt: Date.now() };
+  save();
+  return code;
+}
+
+/**
+ * Подтвердить код, введённый с другого мессенджера. rawUid — "сырой" id
+ * аккаунта, который вводит код (сам ещё ни к чему не привязан).
+ * Возвращает {ok:true, canonicalUid} либо {ok:false, error}, где error —
+ * 'not-found' (код не найден/истёк), 'same' (это и так один профиль) или
+ * 'has-profile' (у этого аккаунта уже есть своя группа/фамилия — привязка
+ * молча стёрла бы её, поэтому отказываем и просим сначала сбросить профиль).
+ */
+function redeemLinkCode(code, rawUid) {
+  purgeExpiredLinkCodes();
+  const key = String(code || '').trim().toUpperCase();
+  const entry = data.linkCodes[key];
+  if (!entry) return { ok: false, error: 'not-found' };
+  const id = String(rawUid);
+  if (resolveUid(id) === entry.canonicalUid) return { ok: false, error: 'same' };
+  const existing = data.users[id];
+  if (existing && (existing.group || existing.teacherName)) return { ok: false, error: 'has-profile' };
+  data.aliases[id] = entry.canonicalUid;
+  delete data.linkCodes[key];
+  save();
+  return { ok: true, canonicalUid: entry.canonicalUid };
+}
+
+/** Все "сырые" id (включая сам канонический), привязанные к тому же профилю, что и rawUid. */
+function linkedIds(rawUid) {
+  const canonical = resolveUid(rawUid);
+  const others = Object.entries(data.aliases)
+    .filter(([, target]) => String(target) === canonical)
+    .map(([id]) => id);
+  return [...new Set([canonical, ...others])];
+}
+
+/** Отвязать rawUid от его канонического профиля (снова становится своим собственным). */
+function unlinkPlatform(rawUid) {
+  const id = String(rawUid);
+  if (!data.aliases[id]) return false;
+  delete data.aliases[id];
+  save();
+  return true;
+}
+
 // ---- статистика -------------------------------------------------
 
 function stats() {
@@ -498,6 +587,11 @@ module.exports = {
   removeAdmin,
   addAdminLog,
   getAdminLog,
+  resolveUid,
+  createLinkCode,
+  redeemLinkCode,
+  linkedIds,
+  unlinkPlatform,
   addScheduledAnnounce,
   listScheduledAnnounces,
   removeScheduledAnnounce,

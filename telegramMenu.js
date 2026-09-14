@@ -181,8 +181,42 @@ function buildSettingsView(s) {
       { text: `Формат: ${fmtLabel(s.format)}`, callback_data: 'set:format' },
       { text: `Погода: ${fmtLabel(s.weatherFormat)}`, callback_data: 'set:wthrformat' },
     ],
+    [{ text: '🔗 Связать с Discord/VK', callback_data: 'set:link' }],
     [{ text: '← В меню', callback_data: 'set:back' }],
   ];
+  return { text: lines.join('\n'), keyboard: kb };
+}
+
+// ---- Связывание аккаунтов ------------------------------------------------
+
+const PLATFORM_LABEL = (id) => (id.startsWith('tg:') ? 'Telegram' : id.startsWith('vk:') ? 'VK' : 'Discord');
+
+/** linkedIds — результат storage.linkedIds(uid). extras: {code, error}. */
+function buildLinkView(linkedIds, extras = {}) {
+  const lines = [b('🔗 Связь с другими мессенджерами')];
+  lines.push('Один и тот же профиль (группа, рассылка, настройки) можно открыть из Discord, Telegram и VK — если их связать.');
+  lines.push('');
+  if (linkedIds.length > 1) {
+    lines.push(`Сейчас привязаны: ${linkedIds.map((id) => b(PLATFORM_LABEL(id))).join(', ')}.`);
+  } else {
+    lines.push('Пока ничего не привязано — это отдельный профиль.');
+  }
+  if (extras.code) {
+    lines.push(`\n📎 Код: ${code(extras.code)}\nВведи его в другом мессенджере (там тоже должна быть кнопка «🔗 Связать») в течение 10 минут.`);
+  }
+  if (extras.error === 'not-found') lines.push('\n⚠️ Код не найден или уже истёк (действует 10 минут).');
+  else if (extras.error === 'same') lines.push('\n⚠️ Это и так один и тот же профиль.');
+  else if (extras.error === 'has-profile') {
+    lines.push('\n⚠️ У этого чата уже есть своя группа/фамилия — привязка стёрла бы её. Если это ошибочный профиль, сначала сбрось группу в настройках, потом повтори.');
+  } else if (extras.error === 'is-root') {
+    lines.push('\n⚠️ Этот чат — основной профиль (к нему привязаны другие мессенджеры). Чтобы отвязать конкретный мессенджер, открой его и нажми «✂️ Отвязать» там.');
+  }
+  const kb = [
+    [{ text: '📎 Получить код для другого мессенджера', callback_data: 'link:code' }],
+    [{ text: '⌨️ Ввести код из другого мессенджера', callback_data: 'link:enter' }],
+  ];
+  if (linkedIds.length > 1) kb.push([{ text: '✂️ Отвязать этот чат', callback_data: 'link:unlink' }]);
+  kb.push([{ text: '← Назад', callback_data: 'set:back' }]);
   return { text: lines.join('\n'), keyboard: kb };
 }
 
@@ -775,6 +809,7 @@ module.exports = {
   fmtLabel,
   nextFormat,
   buildSettingsView,
+  buildLinkView,
   buildPauseView,
   buildAwayView,
   buildRoleView,
