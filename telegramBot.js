@@ -1,8 +1,10 @@
 'use strict';
 
-// Telegram-версия бота. Отдельный процесс (npm run telegram), своя пара
-// storage-файла (см. README/инструкцию) — чтобы не писать в тот же users.json,
-// что и Discord-бот, из двух процессов одновременно.
+// Telegram-версия бота. Обычно подключается вместе с Discord-ботом из bot.js
+// (один процесс, один и тот же users.json — Node кеширует storage.js по пути,
+// так что оба бота делят один и тот же объект данных без гонки). Можно также
+// запускать отдельно (npm run telegram), но тогда, если Discord-бот в это же
+// время пишет в тот же DATA_FILE из другого процесса, нужен СВОЙ DATA_FILE.
 //
 // Ядро — то же самое, что у Discord-бота: storage.js, scheduleSource.js,
 // weather.js, busSource.js, dates.js, render.js, config.js. Отличается только
