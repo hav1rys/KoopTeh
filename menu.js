@@ -327,9 +327,7 @@ function buildLinkView(linkedIds, extras = {}) {
   if (extras.code) lines.push(`\n📎 Код: \`${extras.code}\`\nВведи его в другом мессенджере (там тоже есть кнопка «🔗 Связать») в течение 10 минут.`);
   if (extras.error === 'not-found') lines.push('\n⚠️ Код не найден или уже истёк (действует 10 минут).');
   else if (extras.error === 'same') lines.push('\n⚠️ Это и так один и тот же профиль.');
-  else if (extras.error === 'has-profile') {
-    lines.push('\n⚠️ У этого аккаунта уже есть своя группа/фамилия — привязка стёрла бы её. Если это ошибочный профиль, сначала сбрось группу в настройках, потом повтори.');
-  } else if (extras.error === 'is-root') {
+  else if (extras.error === 'is-root') {
     lines.push('\n⚠️ Этот аккаунт — основной профиль (к нему привязаны другие мессенджеры). Чтобы отвязать конкретный мессенджер, открой его и нажми «✂️ Отвязать» там.');
   }
   const embed = new EmbedBuilder().setColor(C.weekday).setTitle('🔗 Связь с другими мессенджерами').setDescription(lines.join('\n'));

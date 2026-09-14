@@ -20,6 +20,7 @@ const ss = require('./scheduleSource');
 const weather = require('./weather');
 const bus = require('./busSource');
 const tm = require('./telegramMenu');
+const discordLog = require('./discordLog');
 
 if (!cfg.telegramToken) {
   console.error('TELEGRAM_BOT_TOKEN не задан. Добавь переменную в панели BotHost (Startup / Variables) этого сервиса.');
@@ -47,13 +48,21 @@ function log(level, msg) {
 const rawId = (chatId) => `tg:${chatId}`;
 const uid = (chatId) => storage.resolveUid(rawId(chatId));
 
+// Логи здесь собираются HTML-разметкой Telegram (<pre>/<code>/<b> + esc()), а
+// уходят теперь в Discord-канал (см. discordLog.js) — Discord этот HTML не
+// понимает, поэтому переводим в его markdown перед отправкой.
+function htmlLogToDiscordText(html) {
+  return String(html)
+    .replace(/<pre>([\s\S]*?)<\/pre>/g, '```\n$1\n```')
+    .replace(/<code>([\s\S]*?)<\/code>/g, '`$1`')
+    .replace(/<b>([\s\S]*?)<\/b>/g, '**$1**')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
 async function logToChannel(text) {
-  if (!cfg.telegramLogChatId) return;
-  try {
-    await bot.sendMessage(cfg.telegramLogChatId, String(text).slice(0, 4000), { parse_mode: 'HTML' });
-  } catch (err) {
-    log('WARN', `лог-канал: ${err.message}`);
-  }
+  await discordLog.send('telegram', htmlLogToDiscordText(text));
 }
 const tag = (rawUid) => `${tm.code(rawUid)}`;
 
@@ -239,8 +248,12 @@ bot.onText(/^\/start\b/, async (msg) => {
   if (!onlyPrivate(msg)) return void bot.sendMessage(msg.chat.id, 'Напиши мне в личные сообщения: t.me/' + (await bot.getMe()).username);
   const rawUid = uid(msg.chat.id);
   const view = menuView(rawUid);
-  const sent = await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard }, disable_web_page_preview: true });
-  void sent;
+  await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard }, disable_web_page_preview: true });
+  // Telegram не даёт одновременно inline- и постоянную клавиатуру на одном сообщении —
+  // ставим постоянную снизу вторым, коротким сообщением.
+  await bot.sendMessage(msg.chat.id, 'Кнопки снизу — быстрый доступ к основным разделам в любой момент.', {
+    reply_markup: { keyboard: tm.mainReplyKeyboard(), resize_keyboard: true, is_persistent: true },
+  });
 });
 
 bot.onText(/^\/помощь\b|^\/help\b/, async (msg) => {
@@ -484,6 +497,29 @@ async function handleCallback(query) {
   if (prefix === 'adm') return void (await onAdminButton(chatId, messageId, rawUid, data.slice(4), ack));
   await ack();
 }
+
+// Текст постоянной клавиатуры снизу (tm.mainReplyKeyboard()) приходит как обычное
+// текстовое сообщение, а не callback_query — сверяем по точному тексту кнопки и
+// прогоняем через тот же onMenuButton, что и инлайн-кнопки меню.
+const KEYBOARD_LABELS = {
+  '📅 Расписание': 'schedule',
+  '📅 Неделя': 'week',
+  '📨 На завтра': 'now',
+  '⚙️ Настройки': 'settings',
+  '🔍 Поиск': 'search',
+  '👨‍🏫 Преподаватель': 'teacher',
+  '🔔 Звонки': 'bell',
+  '🚪 Кабинеты': 'rooms',
+  '🌤 Погода': 'weather',
+  '🚌 Автобус': 'bus',
+  '❓ Задать вопрос': 'ask',
+  'ℹ️ Помощь': 'help',
+};
+// У кнопки снизу нет callback_query — если onMenuButton попытается что-то подсказать
+// через ack(text) (например «сначала укажи населённый пункт»), просто шлём это текстом.
+const sendAsAck = (chatId) => async (text) => {
+  if (text) await bot.sendMessage(chatId, text);
+};
 
 async function onMenuButton(chatId, messageId, rawUid, action, ack) {
   const s = effState(rawUid);
@@ -1082,6 +1118,7 @@ async function broadcastAnnouncement(text, group) {
 
 async function relayToAdmin(chatId, rawUid, topic, body) {
   const qid = storage.addQuestion(rawUid, `tg:${chatId}`, topic, body);
+  await logToChannel(`❓ ${tag(rawUid)} — ${tm.esc(topic)}\n<pre>${tm.esc(body.slice(0, 1500))}</pre>\nID: <code>${qid}</code>`);
   const admins = storage.getAdmins().filter((a) => String(a).startsWith('tg:'));
   let delivered = 0;
   for (const adminUid of admins) {
@@ -1126,6 +1163,11 @@ bot.on('message', async (msg) => {
   try {
     if (!onlyPrivate(msg) || !msg.text || msg.text.startsWith('/')) return;
     const rawUid = uid(msg.chat.id);
+    const keyboardAction = KEYBOARD_LABELS[msg.text.trim()];
+    if (keyboardAction) {
+      awaiting.delete(rawUid);
+      return void (await onMenuButton(msg.chat.id, null, rawUid, keyboardAction, sendAsAck(msg.chat.id)));
+    }
     const pending = awaiting.get(rawUid);
     if (!pending) return;
     awaiting.delete(rawUid);

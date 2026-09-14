@@ -9,7 +9,6 @@ const {
   SlashCommandBuilder,
   ApplicationIntegrationType,
   InteractionContextType,
-  EmbedBuilder,
 } = require('discord.js');
 
 const cfg = require('./config');
@@ -40,41 +39,16 @@ function log(level, msg) {
 
 // ---------------------------------------------------------- подробный лог в канал
 
-/** Пишет строку в служебный канал на сервере (см. cfg.logChannelId). Best-effort, не мешает основной логике. */
-// Цвет эмбеда лога — по эмодзи в начале первой строки (не нужно менять сигнатуру
-// на всех ~20 местах вызова, достаточно один раз поправить сам logToChannel).
-const LOG_COLOR_BY_EMOJI = [
-  ['🆕', 0x2f9e44], // регистрация
-  ['🔄', 0x2b6cb0], // смена группы/фамилии
-  ['👤', 0x2b6cb0], // роль
-  ['🔔', 0x1098ad], // подписка
-  ['📢', 0xd9a441], // объявление
-  ['🕓', 0xd9a441], // отложенное объявление
-  ['🛠', 0xd9a441], // админ
-  ['📨', 0x7048e8], // ежедневная рассылка
-  ['📋', 0x495057], // запросы расписания
-  ['🚀', 0x5865f2], // запуск
-  ['🛑', 0xe03131], // остановка
-  ['⚠️', 0xe03131], // ошибки/алерты
-];
+const discordLog = require('./discordLog');
 
-/** Пишет красивый эмбед в служебный канал (см. cfg.logChannelId). Best-effort, не мешает основной логике. */
+/**
+ * Пишет строку в один из 4 категорийных каналов (действия/отправки/ошибки/вопросы —
+ * см. discordLog.js), категория и цвет определяются по эмодзи в начале текста.
+ * Best-effort, не мешает основной логике. Сигнатура не менялась — на ~20 местах
+ * вызова ничего трогать не пришлось.
+ */
 async function logToChannel(text) {
-  if (!cfg.logChannelId) return;
-  try {
-    const channel = await client.channels.fetch(cfg.logChannelId);
-    if (!channel || !channel.isTextBased()) return;
-    const str = String(text);
-    const firstLine = str.split('\n')[0] || '';
-    const match = LOG_COLOR_BY_EMOJI.find(([emoji]) => firstLine.startsWith(emoji));
-    const embed = new EmbedBuilder()
-      .setColor(match ? match[1] : 0x5865f2)
-      .setDescription(str.slice(0, 4000))
-      .setTimestamp(Date.now());
-    await channel.send({ embeds: [embed] });
-  } catch (err) {
-    log('WARN', `лог-канал: ${err.message}`);
-  }
+  await discordLog.send('discord', text);
 }
 
 const tag = (uid) => `<@${uid}> (\`${uid}\`)`;
@@ -1633,6 +1607,7 @@ async function broadcastAnnouncement(text, group) {
 
 async function relayToAdmin(interaction, uid, topic, body) {
   const qid = storage.addQuestion(uid, interaction.user.tag, topic, body);
+  await logToChannel(`❓ ${tag(uid)} — ${topic}\n\`\`\`\n${body.slice(0, 1500)}\n\`\`\`\nID: \`${qid}\``);
   const payload = menu.adminQuestionMessage(storage.getQuestion(qid), qid);
   let delivered = 0;
   for (const adminId of storage.getAdmins()) {

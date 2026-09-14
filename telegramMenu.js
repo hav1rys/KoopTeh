@@ -112,6 +112,22 @@ function buildMenu(s, extras = {}) {
   return { text: lines.join('\n'), keyboard: [row1, row2, row3, row4] };
 }
 
+/** Постоянная клавиатура снизу экрана (под полем ввода) — та же основная навигация,
+ * что в buildMenu, только текстовыми кнопками. Не зависит от per-user состояния
+ * (кроме глобального cfg.weatherEnabled), чтобы не приходилось пересылать её при
+ * каждом изменении настроек — «🚌 Автобус» показывается всегда, а если населённый
+ * пункт не задан, при нажатии просто придёт подсказка его указать. */
+function mainReplyKeyboard() {
+  const row3 = ['🔔 Звонки', '🚪 Кабинеты'];
+  if (cfg.weatherEnabled) row3.push('🌤 Погода');
+  return [
+    ['📅 Расписание', '📅 Неделя', '📨 На завтра'],
+    ['⚙️ Настройки', '🔍 Поиск', '👨‍🏫 Преподаватель'],
+    row3,
+    ['🚌 Автобус', '❓ Задать вопрос', 'ℹ️ Помощь'],
+  ];
+}
+
 // ---- Помощь -----------------------------------------------------------
 
 function buildHelpView() {
@@ -206,9 +222,7 @@ function buildLinkView(linkedIds, extras = {}) {
   }
   if (extras.error === 'not-found') lines.push('\n⚠️ Код не найден или уже истёк (действует 10 минут).');
   else if (extras.error === 'same') lines.push('\n⚠️ Это и так один и тот же профиль.');
-  else if (extras.error === 'has-profile') {
-    lines.push('\n⚠️ У этого чата уже есть своя группа/фамилия — привязка стёрла бы её. Если это ошибочный профиль, сначала сбрось группу в настройках, потом повтори.');
-  } else if (extras.error === 'is-root') {
+  else if (extras.error === 'is-root') {
     lines.push('\n⚠️ Этот чат — основной профиль (к нему привязаны другие мессенджеры). Чтобы отвязать конкретный мессенджер, открой его и нажми «✂️ Отвязать» там.');
   }
   const kb = [
@@ -805,6 +819,7 @@ module.exports = {
   code,
   relTime,
   buildMenu,
+  mainReplyKeyboard,
   buildHelpView,
   fmtLabel,
   nextFormat,

@@ -480,11 +480,12 @@ function createLinkCode(rawUid) {
 
 /**
  * Подтвердить код, введённый с другого мессенджера. rawUid — "сырой" id
- * аккаунта, который вводит код (сам ещё ни к чему не привязан).
- * Возвращает {ok:true, canonicalUid} либо {ok:false, error}, где error —
- * 'not-found' (код не найден/истёк), 'same' (это и так один профиль) или
- * 'has-profile' (у этого аккаунта уже есть своя группа/фамилия — привязка
- * молча стёрла бы её, поэтому отказываем и просим сначала сбросить профиль).
+ * аккаунта, который вводит код. Если у этого аккаунта уже была своя группа/
+ * настройки — они молча заменяются профилем из кода (намеренно: линковка
+ * всегда объединяет в один профиль, независимо от того, что уже было настроено
+ * на привязываемом устройстве). Возвращает {ok:true, canonicalUid} либо
+ * {ok:false, error}, где error — 'not-found' (код не найден/истёк) или
+ * 'same' (это и так один и тот же профиль).
  */
 function redeemLinkCode(code, rawUid) {
   purgeExpiredLinkCodes();
@@ -493,8 +494,6 @@ function redeemLinkCode(code, rawUid) {
   if (!entry) return { ok: false, error: 'not-found' };
   const id = String(rawUid);
   if (resolveUid(id) === entry.canonicalUid) return { ok: false, error: 'same' };
-  const existing = data.users[id];
-  if (existing && (existing.group || existing.teacherName)) return { ok: false, error: 'has-profile' };
   data.aliases[id] = entry.canonicalUid;
   delete data.linkCodes[key];
   save();

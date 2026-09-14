@@ -86,9 +86,31 @@ module.exports = {
   healthAlertEnabled: !/^(0|false|no|off)$/i.test((process.env.HEALTH_ALERT_ENABLED || '').trim()),
   healthAlertHours: positiveNumber(process.env.HEALTH_ALERT_HOURS, 3),
 
-  // Канал на сервере для подробного лога действий (регистрация, смена группы, рассылка и т.д.).
-  // Пусто -> логирование в канал выключено. Бот должен быть участником этого сервера с правом писать в канал.
-  logChannelId: (process.env.LOG_CHANNEL_ID || '1548245691707686982').trim(),
+  // Discord-сервер для логов и каналы по 4 категориям × 3 площадкам (см. discordLog.js).
+  // Пусто у конкретного канала -> для этой пары категория/площадка логирование выключено.
+  logGuildId: (process.env.LOG_GUILD_ID || '1549103911342702673').trim(),
+  logChannels: {
+    errors: {
+      discord: (process.env.LOG_ERRORS_DISCORD || '1549104016909279253').trim(),
+      telegram: (process.env.LOG_ERRORS_TELEGRAM || '1549104070357291018').trim(),
+      vk: (process.env.LOG_ERRORS_VK || '1549104260589944952').trim(),
+    },
+    broadcasts: {
+      discord: (process.env.LOG_BROADCASTS_DISCORD || '1549104444640067754').trim(),
+      telegram: (process.env.LOG_BROADCASTS_TELEGRAM || '1549104470376317078').trim(),
+      vk: (process.env.LOG_BROADCASTS_VK || '1549104485542920262').trim(),
+    },
+    actions: {
+      discord: (process.env.LOG_ACTIONS_DISCORD || '1549104648206680175').trim(),
+      telegram: (process.env.LOG_ACTIONS_TELEGRAM || '1549104714895851600').trim(),
+      vk: (process.env.LOG_ACTIONS_VK || '1549104733418029066').trim(),
+    },
+    questions: {
+      discord: (process.env.LOG_QUESTIONS_DISCORD || '1549104861151498421').trim(),
+      telegram: (process.env.LOG_QUESTIONS_TELEGRAM || '1549104878297808967').trim(),
+      vk: (process.env.LOG_QUESTIONS_VK || '1549104893808222348').trim(),
+    },
+  },
 
   // Официальный API Яндекс.Расписаний (https://yandex.ru/dev/rasp/) — используется для
   // автобусов, когда скрапинг rasp.yandex.ru стал отдавать капчу серверным запросам.
@@ -104,7 +126,6 @@ module.exports = {
   // писать в тот же users.json из двух процессов одновременно.
   telegramToken: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
   telegramAdminId: (process.env.TELEGRAM_ADMIN_ID || '').trim(),
-  telegramLogChatId: (process.env.TELEGRAM_LOG_CHAT_ID || '').trim(),
 
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
