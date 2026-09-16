@@ -159,6 +159,10 @@ function nextFormat(cur) {
 
 // ---- Настройки --------------------------------------------------------
 
+// VK живьём режет инлайн-клавиатуру уже на 14 кнопках ("Code №911 - too much
+// buttons"), при этом 12 кнопок (как в buildMenu) проходят нормально — реальный
+// потолок явно намного строже документированных где-либо чисел. Поэтому
+// настройки в VK разбиты на два экрана вместо одного (как в Telegram/Discord).
 function buildSettingsView(s) {
   const noSubj = !s.subj;
   const teacherMode = s.role === 'teacher' && s.teacherName;
@@ -170,11 +174,6 @@ function buildSettingsView(s) {
     `🔔 Рассылка: ${noSubj ? 'нужна группа/фамилия' : paused ? `⏸ пауза до ${isoToDM(s.pausedUntil)}` : s.subscribed ? '✅ включена' : '⛔ выключена'}`,
     `🕘 Время: ${s.time}${s.customTime ? '' : ' (по умолч.)'}`,
     `📆 Дни: ${daysLabel(s.days)}`,
-    `⏰ Напоминания: ${s.reminderMinutes ? `за ${s.reminderMinutes} мин` : 'выкл'}`,
-    `☀️ Утро: ${s.morning ? s.morningTime : 'выкл'}`,
-    `🖼 Формат: ${fmtLabel(s.format)}`,
-    `🚪 Окна «пар нет»: ${s.showGaps ? 'показывать' : 'скрывать'}`,
-    `🏘 Не из города: ${s.away && s.homePlace ? s.homePlace : '—'}`,
   ];
   const kb = [
     [
@@ -188,6 +187,26 @@ function buildSettingsView(s) {
       { text: '📆 Дни', callback_data: 'set:days' },
     ],
     [
+      { text: '⚙️ Ещё настройки →', callback_data: 'set:more' },
+      { text: '← В меню', callback_data: 'set:back' },
+    ],
+  ];
+  return { text: lines.join('\n'), keyboard: kb };
+}
+
+/** Вторая страница настроек (только VK — из-за лимита на кнопки в одной клавиатуре). */
+function buildSettingsMoreView(s) {
+  const lines = [
+    b('⚙️ Ещё настройки'),
+    `⏰ Напоминания: ${s.reminderMinutes ? `за ${s.reminderMinutes} мин` : 'выкл'}`,
+    `☀️ Утро: ${s.morning ? s.morningTime : 'выкл'}`,
+    `🏘 Не из города: ${s.away && s.homePlace ? s.homePlace : '—'}`,
+    `🖼 Формат: ${fmtLabel(s.format)}`,
+    `🌤 Формат погоды: ${fmtLabel(s.weatherFormat)}`,
+    `🚪 Окна «пар нет»: ${s.showGaps ? 'показывать' : 'скрывать'}`,
+  ];
+  const kb = [
+    [
       { text: '⏰ Напоминания', callback_data: 'set:reminder' },
       { text: '☀️ Утро', callback_data: 'set:morning' },
       { text: '🏘 Не из города', callback_data: 'set:away' },
@@ -199,7 +218,7 @@ function buildSettingsView(s) {
     ],
     [
       { text: '🔗 Связать', callback_data: 'set:link' },
-      { text: '← В меню', callback_data: 'set:back' },
+      { text: '← Назад', callback_data: 'set:moreback' },
     ],
   ];
   return { text: lines.join('\n'), keyboard: kb };
@@ -816,6 +835,7 @@ module.exports = {
   fmtLabel,
   nextFormat,
   buildSettingsView,
+  buildSettingsMoreView,
   buildLinkView,
   buildPauseView,
   buildAwayView,

@@ -564,10 +564,17 @@ async function onMenuButton(peerId, cmid, rawUid, action, ack) {
 async function onSettingsButton(peerId, cmid, rawUid, rest, ack) {
   const s = effState(rawUid);
   const back = () => render(peerId, cmid, vm.buildSettingsView(effState(rawUid)));
+  const backMore = () => render(peerId, cmid, vm.buildSettingsMoreView(effState(rawUid)));
   switch (rest) {
     case 'back':
       await ack();
       return void (await render(peerId, cmid, menuView(rawUid)));
+    case 'more':
+      await ack();
+      return void (await render(peerId, cmid, vm.buildSettingsMoreView(s)));
+    case 'moreback':
+      await ack();
+      return void (await back());
     case 'group':
       await ack();
       return void (await openGroupPicker(peerId, cmid, rawUid));
@@ -591,15 +598,15 @@ async function onSettingsButton(peerId, cmid, rawUid, rest, ack) {
     case 'togglegaps':
       storage.setShowGaps(rawUid, !s.showGaps);
       await ack();
-      return void (await back());
+      return void (await backMore());
     case 'format':
       storage.setFormat(rawUid, vm.nextFormat(s.format));
       await ack();
-      return void (await back());
+      return void (await backMore());
     case 'wthrformat':
       storage.setWeatherFormat(rawUid, vm.nextFormat(s.weatherFormat));
       await ack();
-      return void (await back());
+      return void (await backMore());
     case 'time':
       await ack();
       awaiting.set(rawUid, { kind: 'time' });
@@ -622,7 +629,7 @@ async function onSettingsButton(peerId, cmid, rawUid, rest, ack) {
 async function onAwayButton(peerId, cmid, rawUid, rest, ack) {
   if (rest === 'back') {
     await ack();
-    return void (await render(peerId, cmid, vm.buildSettingsView(effState(rawUid))));
+    return void (await render(peerId, cmid, vm.buildSettingsMoreView(effState(rawUid))));
   }
   if (rest === 'toggle') {
     const s = effState(rawUid);
@@ -737,7 +744,7 @@ async function onDaysButton(peerId, cmid, rawUid, rest, ack) {
 async function onReminderButton(peerId, cmid, rawUid, rest, ack) {
   if (rest === 'done') {
     await ack();
-    return void (await render(peerId, cmid, vm.buildSettingsView(effState(rawUid))));
+    return void (await render(peerId, cmid, vm.buildSettingsMoreView(effState(rawUid))));
   }
   if (rest.startsWith('set:')) {
     const n = Number(rest.slice(4));
@@ -752,7 +759,7 @@ async function onReminderButton(peerId, cmid, rawUid, rest, ack) {
 async function onMorningButton(peerId, cmid, rawUid, rest, ack) {
   if (rest === 'done') {
     await ack();
-    return void (await render(peerId, cmid, vm.buildSettingsView(effState(rawUid))));
+    return void (await render(peerId, cmid, vm.buildSettingsMoreView(effState(rawUid))));
   }
   if (rest === 'time') {
     await ack();
