@@ -1321,12 +1321,22 @@ function noteModal(iso) {
 
 // ---- Сообщения вопрос/ответ администратору --------------------
 
+// askerTag — всегда "сырой" маршрутизируемый адрес (голый Discord id, или
+// tg:<chatId>, или vk:<peerId>), нужен для доставки ответа (см. index.js
+// modal:answer:) — для Discord-адреса показываем его как упоминание.
+function askerLabel(q) {
+  const t = String(q.askerTag || q.askerId);
+  if (t.startsWith('tg:')) return `Telegram \`${t.slice(3)}\``;
+  if (t.startsWith('vk:')) return `VK \`${t.slice(3)}\``;
+  return `<@${t}> (\`${t}\`)`;
+}
+
 function adminQuestionMessage(q, qid) {
   const embed = new EmbedBuilder()
     .setColor(0xd9a441)
     .setTitle(`❓ ${q.topic}`.slice(0, 256))
     .setDescription(q.question.slice(0, 4000))
-    .addFields({ name: 'От кого', value: `${q.askerTag} (\`${q.askerId}\`)` })
+    .addFields({ name: 'От кого', value: askerLabel(q) })
     .setFooter({ text: `вопрос ${qid}` })
     .setTimestamp(q.at || Date.now());
   return {

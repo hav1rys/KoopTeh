@@ -12,8 +12,15 @@
 //                             запросы расписания, запуск/остановка
 //   отправки (broadcasts)  — итоговая статистика по ежедневной рассылке расписаний
 //   ошибки (errors)        — WARN/ERROR, необработанные исключения, health-алерты
-//   вопросы (questions)    — копия вопроса из «❓ Задать вопрос» (сам вопрос и ответ
-//                             на него по-прежнему идут через ЛС/reply, это только копия)
+//   вопросы (questions)    — вопрос из «❓ Задать вопрос», С КНОПКОЙ «Ответить»:
+//                             клик обрабатывает Discord-бот (index.js, тот же
+//                             ans:<qid> / answerModal, что и для его собственных
+//                             вопросов) — работает независимо от того, откуда
+//                             сообщение с кнопкой было отправлено (REST здесь
+//                             или client.send в index.js), т.к. кнопки Discord
+//                             привязаны к приложению-боту, а не к отправителю
+//                             сообщения. Ответ доставляется обратно через
+//                             platformBridge.js, если вопрос пришёл не с Discord.
 
 const cfg = require('./config');
 
@@ -58,4 +65,28 @@ async function send(platform, text) {
   }
 }
 
-module.exports = { send };
+/** Как send(), но добавляет кнопку «Ответить» (custom_id: ans:<qid>) — для канала «вопросы». */
+async function sendQuestion(platform, text, qid) {
+  const channelId = cfg.logChannels.questions && cfg.logChannels.questions[platform];
+  if (!channelId || !cfg.token) return;
+  try {
+    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bot ${cfg.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        embeds: [{ description: String(text).slice(0, 4000), color: 0x1098ad, timestamp: new Date().toISOString() }],
+        components: [
+          {
+            type: 1,
+            components: [{ type: 2, style: 1, label: 'Ответить', custom_id: `ans:${qid}` }],
+          },
+        ],
+      }),
+    });
+    if (!res.ok) console.error(`лог (questions/${platform}): HTTP ${res.status} ${await res.text().catch(() => '')}`.slice(0, 300));
+  } catch (err) {
+    console.error(`лог (questions/${platform}): ${err.message}`);
+  }
+}
+
+module.exports = { send, sendQuestion };

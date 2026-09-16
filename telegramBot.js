@@ -21,6 +21,7 @@ const weather = require('./weather');
 const bus = require('./busSource');
 const tm = require('./telegramMenu');
 const discordLog = require('./discordLog');
+const bridge = require('./platformBridge');
 
 if (!cfg.telegramToken) {
   console.error('TELEGRAM_BOT_TOKEN не задан. Добавь переменную в панели BotHost (Startup / Variables) этого сервиса.');
@@ -190,6 +191,10 @@ async function safeSchedule(subj, target, showGaps) {
 
 const bot = new TelegramBot(cfg.telegramToken, { polling: true });
 bot.on('polling_error', (err) => log('WARN', `polling: ${err.message}`));
+
+// Позволяет Discord-боту доставить сюда ответ на вопрос, заданный через Telegram
+// (когда админ отвечает из Discord-канала «Вопросы»). См. platformBridge.js.
+bridge.register('telegram', (chatId, text) => bot.sendMessage(chatId, text));
 
 /** Единый рендер payload'а {text|photo, keyboard} — редактирует messageId, если можно, иначе шлёт новое. */
 async function render(chatId, messageId, payload) {
@@ -1121,7 +1126,9 @@ async function broadcastAnnouncement(text, group) {
 
 async function relayToAdmin(chatId, rawUid, topic, body) {
   const qid = storage.addQuestion(rawUid, `tg:${chatId}`, topic, body);
-  await logToChannel(`❓ ${tag(rawUid)} — ${tm.esc(topic)}\n<pre>${tm.esc(body.slice(0, 1500))}</pre>\nID: <code>${qid}</code>`);
+  // В канал «Вопросы» уходит Discord-разметка напрямую (не через htmlLogToDiscordText —
+  // этот вызов не проходит через logToChannel), с кнопкой «Ответить» — см. discordLog.js.
+  await discordLog.sendQuestion('telegram', `❓ \`${rawUid}\` — ${topic}\n\`\`\`\n${body.slice(0, 1500)}\n\`\`\``, qid);
   const admins = storage.getAdmins().filter((a) => String(a).startsWith('tg:'));
   let delivered = 0;
   for (const adminUid of admins) {

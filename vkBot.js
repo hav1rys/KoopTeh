@@ -30,6 +30,7 @@ const weather = require('./weather');
 const bus = require('./busSource');
 const vm = require('./vkMenu');
 const discordLog = require('./discordLog');
+const bridge = require('./platformBridge');
 
 if (!cfg.vkToken) {
   console.error('VK_BOT_TOKEN не задан. Добавь переменную в панели BotHost (Startup / Variables) этого сервиса.');
@@ -181,6 +182,12 @@ async function safeSchedule(subj, target, showGaps) {
 
 const vk = new VK({ token: cfg.vkToken });
 
+// Позволяет Discord-боту доставить сюда ответ на вопрос, заданный через VK
+// (когда админ отвечает из Discord-канала «Вопросы»). См. platformBridge.js.
+// send() определена ниже как function-объявление — доступна здесь благодаря
+// hoisting'у (вызвана она будет заведомо позже, после полной загрузки модуля).
+bridge.register('vk', (peerId, text) => send(peerId, { text }));
+
 const randomId = () => Math.floor(Math.random() * 2 ** 31) - 2 ** 30;
 
 /** {text, callback_data}[][] (как в telegramMenu.js) -> реальная inline-клавиатура VK. */
@@ -214,10 +221,17 @@ function toVkKeyboard(rows) {
 // photo — тогда photos.saveMessagesPhoto падает с "photo is undefined". Указываем
 // оба явно через полную форму source.values (см. руководство vk-io по загрузке).
 async function uploadPhoto(buffer) {
-  const uploaded = await vk.upload.messagePhoto({
-    source: { values: [{ value: buffer, filename: 'schedule.png', contentType: 'image/png' }] },
-  });
-  return String(uploaded);
+  log('INFO', `uploadPhoto: isBuffer=${Buffer.isBuffer(buffer)} length=${buffer && buffer.length}`);
+  try {
+    const uploaded = await vk.upload.messagePhoto({
+      source: { values: [{ value: buffer, filename: 'schedule.png', contentType: 'image/png' }] },
+    });
+    log('INFO', `uploadPhoto: результат ${JSON.stringify(uploaded)}`);
+    return String(uploaded);
+  } catch (err) {
+    log('ERROR', `uploadPhoto: ${err.stack || err}${err.params ? ` params=${JSON.stringify(err.params)}` : ''}`);
+    throw err;
+  }
 }
 
 /** Единый рендер payload'а {text|photo, keyboard} — редактирует cmid, если можно, иначе шлёт новое. */
@@ -1089,7 +1103,8 @@ async function broadcastAnnouncement(text, group) {
 
 async function relayToAdmin(peerId, rawUid, topic, body) {
   const qid = storage.addQuestion(rawUid, `vk:${peerId}`, topic, body);
-  await logToChannel(`❓ ${tag(rawUid)} — ${topic}\n${body.slice(0, 1500)}\nID: ${qid}`);
+  // В канал «Вопросы» — с кнопкой «Ответить», см. discordLog.js.
+  await discordLog.sendQuestion('vk', `❓ \`${rawUid}\` — ${topic}\n\`\`\`\n${body.slice(0, 1500)}\n\`\`\``, qid);
   const admins = storage.getAdmins().filter((a) => String(a).startsWith('vk:'));
   let delivered = 0;
   for (const adminUid of admins) {

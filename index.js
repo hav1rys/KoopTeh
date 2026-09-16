@@ -19,6 +19,7 @@ const render = require('./render');
 const weather = require('./weather');
 const bus = require('./busSource');
 const menu = require('./menu');
+const bridge = require('./platformBridge');
 
 if (!cfg.token) {
   console.error('DISCORD_BOT_TOKEN не задан. Добавь переменную в панели BotHost (Startup / Variables).');
@@ -1372,11 +1373,24 @@ async function onModal(interaction) {
     if (!q) return void (await interaction.reply({ content: 'Вопрос не найден или на него уже ответили.' }));
     const answer = interaction.fields.getTextInputValue('answer').trim();
     if (!answer) return void (await interaction.reply({ content: 'Пустой ответ.' }));
+    // askerTag теперь всегда "сырой" маршрутизируемый адрес (см. relayToAdmin):
+    // голый Discord id, или tg:<chatId>, или vk:<peerId> — определяет, куда
+    // реально доставлять ответ, независимо от того, откуда админ нажал «Ответить»
+    // (личка или один из каналов «Вопросы»).
+    const addr = String(q.askerTag || q.askerId);
     try {
-      const asker = await client.users.fetch(q.askerId);
-      await asker.send(menu.answerMessage(q, answer));
+      if (addr.startsWith('tg:') || addr.startsWith('vk:')) {
+        const platform = addr.startsWith('tg:') ? 'telegram' : 'vk';
+        const rawAddr = addr.slice(3);
+        const plainText = `💬 Ответ на твой вопрос: ${q.topic}\n\n${q.question}\n\nОтвет: ${answer}`;
+        const ok = await bridge.deliver(platform, rawAddr, plainText);
+        if (!ok) throw new Error(`площадка ${platform} сейчас недоступна или отправка не удалась`);
+      } else {
+        const asker = await client.users.fetch(addr);
+        await asker.send(menu.answerMessage(q, answer));
+      }
       storage.deleteQuestion(qid);
-      log('INFO', `ответ на вопрос ${qid} доставлен ${q.askerId}`);
+      log('INFO', `ответ на вопрос ${qid} доставлен ${addr}`);
       await interaction.reply({ content: '✅ Ответ отправлен пользователю.' });
       try {
         if (interaction.isFromMessage && interaction.isFromMessage() && interaction.message) {
@@ -1606,8 +1620,12 @@ async function broadcastAnnouncement(text, group) {
 }
 
 async function relayToAdmin(interaction, uid, topic, body) {
-  const qid = storage.addQuestion(uid, interaction.user.tag, topic, body);
-  await logToChannel(`❓ ${tag(uid)} — ${topic}\n\`\`\`\n${body.slice(0, 1500)}\n\`\`\`\nID: \`${qid}\``);
+  // askerTag — раньше было interaction.user.tag (просто отображаемое имя, не
+  // адрес) — теперь это реальный "сырой" Discord id, чтобы ответ на вопрос можно
+  // было доставить и когда админ отвечает из Discord-канала «Вопросы» кнопкой,
+  // а не только через ЛС (см. onModal -> modal:answer:).
+  const qid = storage.addQuestion(uid, interaction.user.id, topic, body);
+  await discordLog.sendQuestion('discord', `❓ ${tag(uid)} — ${topic}\n\`\`\`\n${body.slice(0, 1500)}\n\`\`\``, qid);
   const payload = menu.adminQuestionMessage(storage.getQuestion(qid), qid);
   let delivered = 0;
   for (const adminId of storage.getAdmins()) {
