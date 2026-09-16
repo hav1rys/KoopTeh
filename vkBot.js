@@ -209,14 +209,24 @@ function toVkKeyboard(rows) {
   return kb;
 }
 
+// Без явных filename/contentType сервер загрузки VK иногда не может корректно
+// распознать «сырой» Buffer (PNG из render.js) и в ответе не возвращает поле
+// photo — тогда photos.saveMessagesPhoto падает с "photo is undefined". Указываем
+// оба явно через полную форму source.values (см. руководство vk-io по загрузке).
+async function uploadPhoto(buffer) {
+  const uploaded = await vk.upload.messagePhoto({
+    source: { values: [{ value: buffer, filename: 'schedule.png', contentType: 'image/png' }] },
+  });
+  return String(uploaded);
+}
+
 /** Единый рендер payload'а {text|photo, keyboard} — редактирует cmid, если можно, иначе шлёт новое. */
 async function render(peerId, cmid, payload) {
   const kb = toVkKeyboard(payload.keyboard);
   if (payload.photo) {
     let attachment;
     try {
-      const uploaded = await vk.upload.messagePhoto({ peer_id: peerId, source: { value: payload.photo } });
-      attachment = String(uploaded);
+      attachment = await uploadPhoto(payload.photo);
     } catch (err) {
       log('WARN', `загрузка фото: ${err.message}`);
       return void (await render(peerId, cmid, { text: payload.caption || 'Не удалось отправить картинку.', keyboard: payload.keyboard }));
@@ -253,8 +263,7 @@ async function send(peerId, payload) {
   if (payload.photo) {
     let attachment;
     try {
-      const uploaded = await vk.upload.messagePhoto({ peer_id: peerId, source: { value: payload.photo } });
-      attachment = String(uploaded);
+      attachment = await uploadPhoto(payload.photo);
     } catch (err) {
       log('WARN', `загрузка фото: ${err.message}`);
       return vk.api.messages.send({ peer_id: peerId, message: (payload.caption || '').slice(0, 4000), random_id: randomId() });
