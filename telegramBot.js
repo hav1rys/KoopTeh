@@ -256,19 +256,22 @@ bot.onText(/^\/start\b/, async (msg) => {
   });
 });
 
-bot.onText(/^\/помощь\b|^\/help\b/, async (msg) => {
+// \b после кириллического слова в JS не срабатывает (\w — только ASCII),
+// поэтому /помощь, /звонки, /сейчас, /расписание, /поиск, /преподаватель
+// используют (?=\s|$) вместо \b — иначе команда никогда не матчится.
+bot.onText(/^\/помощь(?=\s|$)|^\/help\b/, async (msg) => {
   if (!onlyPrivate(msg)) return;
   const view = tm.buildHelpView();
   await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard } });
 });
 
-bot.onText(/^\/звонки\b/, async (msg) => {
+bot.onText(/^\/звонки(?=\s|$)/, async (msg) => {
   if (!onlyPrivate(msg)) return;
   const view = tm.bellView();
   await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard } });
 });
 
-bot.onText(/^\/сейчас\b/, async (msg) => {
+bot.onText(/^\/сейчас(?=\s|$)/, async (msg) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const s = effState(rawUid);
@@ -285,7 +288,7 @@ bot.onText(/^\/сейчас\b/, async (msg) => {
   await logSchedule(rawUid, '/сейчас', data);
 });
 
-bot.onText(/^\/расписание\b\s*(.*)$/, async (msg, match) => {
+bot.onText(/^\/расписание(?=\s|$)\s*(.*)$/, async (msg, match) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const s = effState(rawUid);
@@ -301,7 +304,7 @@ bot.onText(/^\/расписание\b\s*(.*)$/, async (msg, match) => {
   await logSchedule(rawUid, `/расписание на ${D.fmtDM(target)}`, d);
 });
 
-bot.onText(/^\/поиск\b\s*(.*)$/, async (msg, match) => {
+bot.onText(/^\/поиск(?=\s|$)\s*(.*)$/, async (msg, match) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const q = (match[1] || '').trim();
@@ -311,7 +314,7 @@ bot.onText(/^\/поиск\b\s*(.*)$/, async (msg, match) => {
   await showLookup(msg.chat.id, rawUid, 'search', isNum ? { room: q } : { teacher: q }, target, { fresh: true });
 });
 
-bot.onText(/^\/преподаватель\b\s*(.*)$/, async (msg, match) => {
+bot.onText(/^\/преподаватель(?=\s|$)\s*(.*)$/, async (msg, match) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const surname = (match[1] || '').trim();

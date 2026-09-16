@@ -1107,13 +1107,16 @@ async function handleMessage(context) {
   const rawUid = uid(peerId);
   const text = context.text.trim();
 
-  if (/^(начать|старт|start)\b/i.test(text)) return void (await sendMainMenu(peerId, rawUid));
-  if (/^помощь\b|^\/?help\b/i.test(text)) {
+  // \b (граница слова) в JS определяется только через ASCII \w — кириллица в
+  // \w не входит, поэтому \b после кириллического слова никогда не сработает.
+  // Используем (?=\s|$) вместо \b везде, где команда написана по-русски.
+  if (/^(начать|старт|start)(?=\s|$)/i.test(text)) return void (await sendMainMenu(peerId, rawUid));
+  if (/^помощь(?=\s|$)|^\/?help(?=\s|$)/i.test(text)) {
     const view = vm.buildHelpView();
     return void (await send(peerId, view));
   }
-  if (/^звонки\b/i.test(text)) return void (await send(peerId, vm.bellView()));
-  if (/^сейчас\b/i.test(text)) {
+  if (/^звонки(?=\s|$)/i.test(text)) return void (await send(peerId, vm.bellView()));
+  if (/^сейчас(?=\s|$)/i.test(text)) {
     const s = effState(rawUid);
     if (!s.subj) return void send(peerId, { text: 'Сначала укажи группу или фамилию (напиши «начать»).' });
     const today = D.todayParts();
@@ -1128,7 +1131,7 @@ async function handleMessage(context) {
     await logSchedule(rawUid, 'сейчас', data);
     return;
   }
-  const schM = /^расписание\b\s*(.*)$/i.exec(text);
+  const schM = /^расписание(?=\s|$)\s*(.*)$/i.exec(text);
   if (schM) {
     const s = effState(rawUid);
     if (!s.subj) return void send(peerId, { text: 'Сначала укажи группу (напиши «начать»), либо напиши «расписание дд.мм».' });
@@ -1142,7 +1145,7 @@ async function handleMessage(context) {
     await logSchedule(rawUid, `расписание на ${D.fmtDM(target)}`, d);
     return;
   }
-  const searchM = /^поиск\b\s*(.*)$/i.exec(text);
+  const searchM = /^поиск(?=\s|$)\s*(.*)$/i.exec(text);
   if (searchM) {
     const q = (searchM[1] || '').trim();
     if (!q) return void send(peerId, { text: 'Напиши: поиск <кабинет или фамилия>, например «поиск 30» или «поиск Иванов».' });
@@ -1150,14 +1153,14 @@ async function handleMessage(context) {
     await showLookup(peerId, rawUid, 'search', isNum ? { room: q } : { teacher: q }, D.todayParts(), { fresh: true });
     return;
   }
-  const teacherM = /^преподаватель\b\s*(.*)$/i.exec(text);
+  const teacherM = /^преподаватель(?=\s|$)\s*(.*)$/i.exec(text);
   if (teacherM) {
     const surname = (teacherM[1] || '').trim();
     if (!surname) return void send(peerId, { text: 'Напиши: преподаватель <фамилия>' });
     await showLookup(peerId, rawUid, 'teacher', { surname }, D.todayParts(), { fresh: true });
     return;
   }
-  if (/^(админ|admin)\b/i.test(text)) {
+  if (/^(админ|admin)(?=\s|$)/i.test(text)) {
     if (!storage.isAdmin(rawUid)) return void send(peerId, { text: 'Нет доступа.' });
     return void (await send(peerId, vm.buildAdminMenu()));
   }
