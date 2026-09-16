@@ -93,7 +93,11 @@ function buildDayData(csvText, subj, target, opts = {}) {
     : ss.buildScheduleData(csvText, subj.name, target, opts);
 }
 
-function effState(uid) {
+// platformRawId — настоящий (непривязанный) Discord id ИМЕННО этого пользователя
+// (interaction.user.id) — нужен только для format/weatherFormat: они свои у
+// каждой площадки, даже если аккаунты связаны /связать (см. storage.js).
+// Необязателен — если не передать, используется uid (без связывания это одно и то же).
+function effState(uid, platformRawId = uid) {
   const s = storage.get(uid);
   return {
     group: s.group,
@@ -105,7 +109,7 @@ function effState(uid) {
     customTime: Boolean(s.time),
     days: Array.isArray(s.days) ? s.days : cfg.defaultDays,
     showGaps: s.showGaps,
-    format: s.format,
+    format: storage.getPlatformFormat(platformRawId),
     reminderMinutes: s.reminderMinutes,
     morning: s.morning,
     morningTime: s.morningTime,
@@ -117,7 +121,7 @@ function effState(uid) {
     homeStop: s.homeStop,
     homeLat: s.homeLat,
     homeLon: s.homeLon,
-    weatherFormat: s.weatherFormat || 'embed',
+    weatherFormat: storage.getPlatformWeatherFormat(platformRawId),
   };
 }
 
@@ -210,7 +214,7 @@ async function renderSchedule(interaction, uid, target) {
     embeds: [],
     components: [],
   });
-  const s = effState(uid);
+  const s = effState(uid, interaction.user.id);
   const { data, url, error } = await safeSchedule(s.subj, target, s.showGaps);
   const withNotes = data ? attachNotes(data, uid, D.iso(target)) : data;
   await interaction.editReply(menu.buildScheduleView(withNotes, D.iso(target), url, error, s.format, s.theme));
@@ -248,7 +252,7 @@ async function showLookup(interaction, uid, kind, params, target, { fresh = fals
   const toDM = fresh && interaction.inGuild();
   if (fresh) await interaction.deferReply(toDM ? { flags: MessageFlags.Ephemeral } : {});
   else await interaction.update({ content: '⏳ Ищу…', embeds: [], components: [] });
-  const s = effState(uid);
+  const s = effState(uid, interaction.user.id);
   lookupState.set(uid, { kind, params, iso: D.iso(target) });
   let view;
   try {
@@ -546,7 +550,7 @@ async function onSlash(interaction) {
     return;
   }
 
-  const s = effState(uid);
+  const s = effState(uid, interaction.user.id);
 
   if (name === 'сейчас') {
     if (!s.subj) return void (await interaction.reply({ content: 'Сначала укажи группу или фамилию через /start.', ...eph }));
@@ -687,7 +691,7 @@ async function pairAvailability({ room, teacher }, pairNo, target) {
 async function onMenuButton(interaction) {
   const action = interaction.customId.slice('menu:'.length);
   const uid = storage.resolveUid(interaction.user.id);
-  const s = effState(uid);
+  const s = effState(uid, interaction.user.id);
 
   switch (action) {
     case 'setgroup': {
@@ -753,7 +757,7 @@ async function onMenuButton(interaction) {
       await interaction.update(menuView(uid));
       return;
     case 'format':
-      storage.setFormat(uid, menu.nextFormat(s.format));
+      storage.setPlatformFormat(interaction.user.id, menu.nextFormat(s.format));
       await interaction.update(menuView(uid));
       return;
     case 'search':
@@ -819,7 +823,7 @@ async function onGroupSelect(interaction) {
 async function onScheduleButton(interaction) {
   const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('sch:'.length);
-  const s = effState(uid);
+  const s = effState(uid, interaction.user.id);
 
   if (rest === 'menu') return void (await interaction.update(menuView(uid)));
 
@@ -1023,8 +1027,8 @@ async function onMorningButton(interaction) {
 async function onSettingsButton(interaction) {
   const uid = storage.resolveUid(interaction.user.id);
   const rest = interaction.customId.slice('set:'.length);
-  const s = effState(uid);
-  const back = () => interaction.update(menu.buildSettingsView(effState(uid)));
+  const s = effState(uid, interaction.user.id);
+  const back = () => interaction.update(menu.buildSettingsView(effState(uid, interaction.user.id)));
 
   switch (rest) {
     case 'back':
@@ -1053,7 +1057,7 @@ async function onSettingsButton(interaction) {
     case 'link':
       return void (await interaction.update(menu.buildLinkView(storage.linkedIds(uid))));
     case 'wthrformat':
-      storage.setWeatherFormat(uid, menu.nextFormat(s.weatherFormat));
+      storage.setPlatformWeatherFormat(interaction.user.id, menu.nextFormat(s.weatherFormat));
       return void (await back());
     case 'togglesub':
       storage.setSubscribed(uid, !s.subscribed);
@@ -1063,7 +1067,7 @@ async function onSettingsButton(interaction) {
       storage.setShowGaps(uid, !s.showGaps);
       return void (await back());
     case 'format':
-      storage.setFormat(uid, menu.nextFormat(s.format));
+      storage.setPlatformFormat(interaction.user.id, menu.nextFormat(s.format));
       return void (await back());
     case 'theme':
       storage.setTheme(uid, menu.nextTheme(s.theme));
@@ -1091,10 +1095,11 @@ async function onLinkButton(interaction) {
   if (rest === 'enter') {
     return void (await interaction.showModal(menu.linkCodeModal()));
   }
-  if (rest === 'unlink') {
-    const ok = storage.unlinkPlatform(interaction.user.id);
+  if (rest.startsWith('unlink:')) {
+    const targetId = rest.slice('unlink:'.length);
+    storage.unlinkId(interaction.user.id, targetId);
     const freshUid = storage.resolveUid(interaction.user.id);
-    return void (await interaction.update(menu.buildLinkView(storage.linkedIds(freshUid), ok ? {} : { error: 'is-root' })));
+    return void (await interaction.update(menu.buildLinkView(storage.linkedIds(freshUid))));
   }
 }
 
@@ -1129,7 +1134,7 @@ async function loadWeekDays(subj, mondayParts) {
 
 async function renderWeek(interaction, uid, mondayParts) {
   await interaction.update({ content: '⏳ Загружаю неделю…', embeds: [], components: [] });
-  const s = effState(uid);
+  const s = effState(uid, interaction.user.id);
   const days = await loadWeekDays(s.subj, mondayParts);
   weekState.set(uid, D.iso(mondayParts));
   await interaction.editReply(menu.buildWeekView({ days }, s.format));
@@ -1175,7 +1180,7 @@ async function onWeekButton(interaction) {
 // -------- погода с листанием дат --------
 
 async function renderWeatherView(interaction, uid, targetIso) {
-  const s = effState(uid);
+  const s = effState(uid, interaction.user.id);
   try {
     const cityForecast = await weather.dayForecast(cfg.weatherLat, cfg.weatherLon, targetIso);
     let homeInfo = null;
@@ -1600,15 +1605,19 @@ async function onModal(interaction) {
 /** Разослать объявление подписчикам (всем или одной группе). */
 async function broadcastAnnouncement(text, group) {
   const wantG = group ? ss.normGroup(group) : null;
-  const subs = storage.subscribers().filter((u) => {
-    if (!wantG) return true;
-    return u.group && u.role !== 'teacher' && ss.normGroup(u.group) === wantG;
-  });
+  const subs = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (!wantG) return true;
+      return u.group && u.role !== 'teacher' && ss.normGroup(u.group) === wantG;
+    });
   let ok = 0;
   let fail = 0;
   for (const u of subs) {
     try {
-      const user = await client.users.fetch(u.userId);
+      const user = await client.users.fetch(u.myId);
       await user.send({ content: `📢 **Объявление**\n\n${text}` });
       ok += 1;
     } catch {
@@ -1649,6 +1658,11 @@ async function relayToAdmin(interaction, uid, topic, body) {
 
 // --------------------------------------------------------- планировщики
 
+// u — запись из storage.subscribers() (может быть общим профилем на несколько
+// связанных площадок); возвращает "сырой" Discord id ЭТОЙ группы, если он там
+// есть (обычные Discord id — просто числа, без префикса tg:/vk:), иначе null.
+const isPlatformPrefixed = (id) => String(id).startsWith('tg:') || String(id).startsWith('vk:');
+const myLinkedId = (u) => u.linkedIds.find((id) => !isPlatformPrefixed(id)) || null;
 let broadcasting = false;
 
 function startSchedulers() {
@@ -1672,16 +1686,17 @@ function startSchedulers() {
 async function pauseReminderTick() {
   const tomIso = D.iso(D.tomorrowParts());
   for (const u of storage.subscribers()) {
-    if (u.pausedUntil !== tomIso || u.pauseEndNotified === tomIso) continue;
+    const myId = myLinkedId(u);
+    if (!myId || u.pausedUntil !== tomIso || storage.getPlatformPauseNotified(myId) === tomIso) continue;
     try {
-      const user = await client.users.fetch(u.userId);
+      const user = await client.users.fetch(myId);
       await user.send({
         content: `⏸ Пауза заканчивается завтра (${D.fmtDM(D.tomorrowParts())}) — рассылка, утро и напоминания снова включатся.`,
       });
     } catch (err) {
-      if (!(err && err.code === 50007)) log('WARN', `пауза-напоминание ${u.userId}: ${err.message || err}`);
+      if (!(err && err.code === 50007)) log('WARN', `пауза-напоминание ${myId}: ${err.message || err}`);
     }
-    storage.setPauseEndNotified(u.userId, tomIso);
+    storage.setPlatformPauseNotified(myId, tomIso);
     await new Promise((r) => setTimeout(r, 400));
   }
 }
@@ -1691,7 +1706,7 @@ async function announceTick() {
   const now = D.tzNow();
   const nowIso = D.iso(D.todayParts());
   const nowHHMM = `${D.pad(now.h)}:${D.pad(now.mi)}`;
-  const due = storage.dueScheduledAnnounces(nowIso, nowHHMM);
+  const due = storage.dueScheduledAnnounces(nowIso, nowHHMM).filter((a) => !isPlatformPrefixed(a.by || ''));
   if (!due.length) return;
   for (const a of due) {
     storage.removeScheduledAnnounce(a.id);
@@ -1714,7 +1729,7 @@ async function announceTick() {
 
 /** Держит кэш CSV на сегодня/завтра тёплым — чтобы «следующая пара» в /start была без задержки. */
 async function warmTick() {
-  const subs = storage.subscribers();
+  const subs = storage.subscribers().filter((u) => myLinkedId(u));
   if (!subs.length) return;
   for (const t of [D.todayParts(), D.tomorrowParts()]) {
     await ss.fetchDayCsv(t, 4 * 60 * 1000).catch(() => {});
@@ -1729,13 +1744,17 @@ async function morningTick() {
   const todayIso = D.iso(today);
   const dow = D.weekdayIso(today);
 
-  const due = storage.subscribers().filter((u) => {
-    if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
-    if (isPaused(u.pausedUntil)) return false;
-    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
-    if (!days.includes(dow)) return false;
-    return u.morningLastSent !== todayIso;
-  });
+  const due = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
+      if (isPaused(u.pausedUntil)) return false;
+      const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+      if (!days.includes(dow)) return false;
+      return storage.getPlatformMorningLastSent(u.myId) !== todayIso;
+    });
   if (!due.length) return;
 
   let csvText = null;
@@ -1782,29 +1801,30 @@ async function morningTick() {
       }
     }
     try {
-      const user = await client.users.fetch(u.userId);
+      const user = await client.users.fetch(u.myId);
       await user.send({ content: body });
       if (cfg.weatherEnabled) {
+        const wf = storage.getPlatformWeatherFormat(u.myId);
         if (u.away && u.homePlace && u.homeLat != null && u.homeLon != null) {
           try {
             const homeForecast = await weather.dayForecast(u.homeLat, u.homeLon);
-            await user.send(menu.buildWeatherMessage(u.homePlace, homeForecast, u.weatherFormat));
+            await user.send(menu.buildWeatherMessage(u.homePlace, homeForecast, wf));
           } catch (err) {
-            log('WARN', `погода (дом, ${u.userId}): ${err.message}`);
+            log('WARN', `погода (дом, ${u.myId}): ${err.message}`);
           }
         }
         if (cityForecast) {
           try {
-            await user.send(menu.buildWeatherMessage(cfg.weatherPlace, cityForecast, u.weatherFormat));
+            await user.send(menu.buildWeatherMessage(cfg.weatherPlace, cityForecast, wf));
           } catch (err) {
-            log('WARN', `погода (город, ${u.userId}): ${err.message}`);
+            log('WARN', `погода (город, ${u.myId}): ${err.message}`);
           }
         }
       }
-      storage.setMorningLastSent(u.userId, todayIso);
+      storage.setPlatformMorningLastSent(u.myId, todayIso);
     } catch (err) {
-      if (err && err.code === 50007) storage.setMorningLastSent(u.userId, todayIso);
-      else log('WARN', `утро ${u.userId}: ${err.message || err}`);
+      if (err && err.code === 50007) storage.setPlatformMorningLastSent(u.myId, todayIso);
+      else log('WARN', `утро ${u.myId}: ${err.message || err}`);
     }
     await new Promise((r) => setTimeout(r, 800));
   }
@@ -1824,14 +1844,18 @@ async function broadcastTick() {
   storage.purgeExpiredPauses(D.iso(D.todayParts()));
   storage.purgeOldNotes(D.iso(D.todayParts()));
 
-  const due = storage.subscribers().filter((u) => {
-    if (isPaused(u.pausedUntil)) return false;
-    const [th, tm] = String(u.time || cfg.defaultTime).split(':').map(Number);
-    if (nowMin < th * 60 + tm) return false;
-    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
-    if (!days.includes(dow)) return false;
-    return u.lastSent !== targetIso;
-  });
+  const due = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (isPaused(u.pausedUntil)) return false;
+      const [th, tm] = String(u.time || cfg.defaultTime).split(':').map(Number);
+      if (nowMin < th * 60 + tm) return false;
+      const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+      if (!days.includes(dow)) return false;
+      return storage.getPlatformLastSent(u.myId) !== targetIso;
+    });
   if (!due.length) return;
 
   broadcasting = true;
@@ -1915,7 +1939,7 @@ async function runBroadcast(due, target, targetIso) {
           content: weekendTomorrow ? '🎉 Завтра выходной — пар нет, отдыхай!' : '📭 Завтра пар нет.',
         };
       } else {
-        payload = menu.scheduleMessage(attachNotes(data, u.userId, targetIso), humanUrl, u.format, u.theme);
+        payload = menu.scheduleMessage(attachNotes(data, u.userId, targetIso), humanUrl, storage.getPlatformFormat(u.myId), u.theme);
         if (!digestSaved.has(sk)) {
           try {
             const canon = buildDayData(csvText, subj, target, {});
@@ -1929,17 +1953,17 @@ async function runBroadcast(due, target, targetIso) {
     }
 
     try {
-      const user = await client.users.fetch(u.userId);
+      const user = await client.users.fetch(u.myId);
       await user.send(payload);
       sent += 1;
-      storage.setLastSent(u.userId, targetIso);
+      storage.setPlatformLastSent(u.myId, targetIso);
     } catch (err) {
       skipped += 1;
       if (err && err.code === 50007) {
-        log('INFO', `ЛС закрыты у ${u.userId} — пропуск`);
-        storage.setLastSent(u.userId, targetIso);
+        log('INFO', `ЛС закрыты у ${u.myId} — пропуск`);
+        storage.setPlatformLastSent(u.myId, targetIso);
       } else {
-        log('WARN', `ЛС ${u.userId}: ${err.message || err}`);
+        log('WARN', `ЛС ${u.myId}: ${err.message || err}`);
       }
     }
     await new Promise((r) => setTimeout(r, 1200));
@@ -1955,7 +1979,10 @@ async function runBroadcast(due, target, targetIso) {
 const remindersSent = new Set(); // `${uid}|${iso}|${startMin}`
 
 async function reminderTick() {
-  const users = storage.subscribers().filter((u) => u.reminderMinutes > 0 && !isPaused(u.pausedUntil));
+  const users = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId && u.reminderMinutes > 0 && !isPaused(u.pausedUntil));
   if (!users.length) return;
   const today = D.todayParts();
   const todayIso = D.iso(today);
@@ -1990,11 +2017,11 @@ async function reminderTick() {
       const startMin = D.toMinutes(r.start);
       if (startMin == null) continue;
       if (startMin - nowMin !== u.reminderMinutes) continue;
-      const dedup = `${u.userId}|${todayIso}|${startMin}`;
+      const dedup = `${u.myId}|${todayIso}|${startMin}`;
       if (remindersSent.has(dedup)) continue;
       remindersSent.add(dedup);
       try {
-        const user = await client.users.fetch(u.userId);
+        const user = await client.users.fetch(u.myId);
         const where = r.room ? `, ауд. ${r.room}` : '';
         const who = subj.kind === 'teacher' && r.groupsText ? ` — ${r.groupsText}` : '';
         const note = r.pair != null ? storage.getNotesForDay(u.userId, todayIso)[r.pair] : null;
@@ -2002,7 +2029,7 @@ async function reminderTick() {
           content: `⏰ Через ${u.reminderMinutes} мин пара: **${r.subject}**${where}${who} (в ${r.start})${note ? `\n📝 ${note}` : ''}`,
         });
       } catch (err) {
-        if (!(err && err.code === 50007)) log('WARN', `напоминание ${u.userId}: ${err.message || err}`);
+        if (!(err && err.code === 50007)) log('WARN', `напоминание ${u.myId}: ${err.message || err}`);
       }
     }
   }
@@ -2018,14 +2045,17 @@ async function changeTick() {
   const entries = storage.digestEntries().filter((e) => e.iso >= todayIso);
   if (!entries.length) return;
 
-  const subs = storage.subscribers();
+  const subs = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId);
   for (const { key, group: sk, iso } of entries) {
     const target = D.partsFromIso(iso);
     if (!target) continue;
     const affected = subs.filter((u) => {
       if (isPaused(u.pausedUntil)) return false;
       const subj = subjOf(u);
-      return subj && subjKey(subj) === sk && u.lastSent === iso;
+      return subj && subjKey(subj) === sk && storage.getPlatformLastSent(u.myId) === iso;
     });
     if (!affected.length) continue;
 
@@ -2063,12 +2093,12 @@ async function changeTick() {
     for (const u of affected) {
       try {
         const data = buildDayData(csvText, subjOf(u), target, { showGaps: u.showGaps });
-        const body = menu.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, u.format, u.theme);
-        const user = await client.users.fetch(u.userId);
+        const body = menu.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, storage.getPlatformFormat(u.myId), u.theme);
+        const user = await client.users.fetch(u.myId);
         await user.send({ content: header });
         await user.send(body);
       } catch (err) {
-        if (!(err && err.code === 50007)) log('WARN', `уведомление об изменении ${u.userId}: ${err.message || err}`);
+        if (!(err && err.code === 50007)) log('WARN', `уведомление об изменении ${u.myId}: ${err.message || err}`);
       }
       await new Promise((r) => setTimeout(r, 800));
     }

@@ -93,7 +93,12 @@ function buildDayData(csvText, subj, target, opts = {}) {
   return subj.kind === 'teacher' ? ss.buildTeacherData(csvText, subj.name, target) : ss.buildScheduleData(csvText, subj.name, target, opts);
 }
 
-function effState(rawUid) {
+// platformRawId — "сырой" (непривязанный) id ИМЕННО этого Telegram-чата — нужен
+// только для format/weatherFormat: они свои у каждой площадки, даже если
+// аккаунты связаны /связать (см. storage.js). Необязателен — если не передать,
+// используется rawUid (при отсутствии связывания это одно и то же); нужен
+// только там, где реально читается s.format/s.weatherFormat.
+function effState(rawUid, platformRawId = rawUid) {
   const s = storage.get(rawUid);
   return {
     group: s.group,
@@ -105,7 +110,7 @@ function effState(rawUid) {
     customTime: Boolean(s.time),
     days: Array.isArray(s.days) ? s.days : cfg.defaultDays,
     showGaps: s.showGaps,
-    format: s.format,
+    format: storage.getPlatformFormat(platformRawId),
     reminderMinutes: s.reminderMinutes,
     morning: s.morning,
     morningTime: s.morningTime,
@@ -116,7 +121,7 @@ function effState(rawUid) {
     homeStop: s.homeStop,
     homeLat: s.homeLat,
     homeLon: s.homeLon,
-    weatherFormat: s.weatherFormat || 'embed',
+    weatherFormat: storage.getPlatformWeatherFormat(platformRawId),
   };
 }
 
@@ -296,7 +301,7 @@ bot.onText(/^\/сейчас(?=\s|$)/, async (msg) => {
 bot.onText(/^\/расписание(?=\s|$)\s*(.*)$/, async (msg, match) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
-  const s = effState(rawUid);
+  const s = effState(rawUid, rawId(msg.chat.id));
   const arg = (match[1] || '').trim();
   const subj = s.subj;
   if (!subj) return void bot.sendMessage(msg.chat.id, 'Сначала укажи группу через /start, либо напиши "/расписание дд.мм".');
@@ -530,7 +535,7 @@ const sendAsAck = (chatId) => async (text) => {
 };
 
 async function onMenuButton(chatId, messageId, rawUid, action, ack) {
-  const s = effState(rawUid);
+  const s = effState(rawUid, rawId(chatId));
   switch (action) {
     case 'schedule': {
       if (!s.subj) return void ack('Сначала укажи группу или фамилию (👤 Роль).');
@@ -615,8 +620,8 @@ async function onMenuButton(chatId, messageId, rawUid, action, ack) {
 }
 
 async function onSettingsButton(chatId, messageId, rawUid, rest, ack) {
-  const s = effState(rawUid);
-  const back = () => render(chatId, messageId, tm.buildSettingsView(effState(rawUid)));
+  const s = effState(rawUid, rawId(chatId));
+  const back = () => render(chatId, messageId, tm.buildSettingsView(effState(rawUid, rawId(chatId))));
   switch (rest) {
     case 'back':
       await ack();
@@ -646,11 +651,11 @@ async function onSettingsButton(chatId, messageId, rawUid, rest, ack) {
       await ack();
       return void (await back());
     case 'format':
-      storage.setFormat(rawUid, tm.nextFormat(s.format));
+      storage.setPlatformFormat(rawId(chatId), tm.nextFormat(s.format));
       await ack();
       return void (await back());
     case 'wthrformat':
-      storage.setWeatherFormat(rawUid, tm.nextFormat(s.weatherFormat));
+      storage.setPlatformWeatherFormat(rawId(chatId), tm.nextFormat(s.weatherFormat));
       await ack();
       return void (await back());
     case 'time':
@@ -711,10 +716,11 @@ async function onLinkButton(chatId, messageId, rawUid, rest, ack) {
     await bot.sendMessage(chatId, 'Пришли код (6 символов), который показал бот в другом мессенджере:');
     return;
   }
-  if (rest === 'unlink') {
-    const ok = storage.unlinkPlatform(rawId(chatId));
+  if (rest.startsWith('unlink:')) {
+    const targetId = rest.slice('unlink:'.length);
+    const ok = storage.unlinkId(rawId(chatId), targetId);
     await ack(ok ? 'Отвязано.' : undefined);
-    return void (await render(chatId, messageId, tm.buildLinkView(storage.linkedIds(uid(chatId)), ok ? {} : { error: 'is-root' })));
+    return void (await render(chatId, messageId, tm.buildLinkView(storage.linkedIds(uid(chatId)))));
   }
   await ack();
 }
@@ -891,7 +897,7 @@ async function onGroupButton(chatId, messageId, rawUid, rest, ack) {
 }
 
 async function renderSchedule(chatId, messageId, rawUid, target) {
-  const s = effState(rawUid);
+  const s = effState(rawUid, rawId(chatId));
   const { data, url, error } = await safeSchedule(s.subj, target, s.showGaps);
   const withNotes = data ? attachNotes(data, rawUid, D.iso(target)) : data;
   const base = error ? { text: tm.esc(error) } : tm.scheduleMessage(withNotes, url, s.format);
@@ -900,7 +906,7 @@ async function renderSchedule(chatId, messageId, rawUid, target) {
 }
 
 async function onScheduleButton(chatId, messageId, rawUid, rest, ack) {
-  const s = effState(rawUid);
+  const s = effState(rawUid, rawId(chatId));
   if (rest === 'menu') {
     await ack();
     return void (await render(chatId, messageId, menuView(rawUid)));
@@ -1103,16 +1109,19 @@ async function onAdminButton(chatId, messageId, rawUid, rest, ack) {
 /** Разослать объявление подписчикам этой платформы (всем или одной группе). */
 async function broadcastAnnouncement(text, group) {
   const wantG = group ? ss.normGroup(group) : null;
-  const subs = storage.subscribers().filter((u) => {
-    if (!String(u.userId).startsWith('tg:')) return false;
-    if (!wantG) return true;
-    return u.group && u.role !== 'teacher' && ss.normGroup(u.group) === wantG;
-  });
+  const subs = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (!wantG) return true;
+      return u.group && u.role !== 'teacher' && ss.normGroup(u.group) === wantG;
+    });
   let ok = 0;
   let fail = 0;
   for (const u of subs) {
     try {
-      await bot.sendMessage(u.userId.slice(3), `📢 ${tm.b('Объявление')}\n\n${tm.esc(text)}`, { parse_mode: 'HTML' });
+      await bot.sendMessage(u.myId.slice(3), `📢 ${tm.b('Объявление')}\n\n${tm.esc(text)}`, { parse_mode: 'HTML' });
       ok += 1;
     } catch {
       fail += 1;
@@ -1401,6 +1410,10 @@ async function handleAwaitingText(chatId, rawUid, pending, text) {
 // --------------------------------------------------------- планировщики (как в index.js, только TG-адресаты)
 
 const isTgId = (id) => String(id).startsWith('tg:');
+// u — запись из storage.subscribers() (может быть общим профилем на несколько
+// связанных площадок); возвращает "сырой" Telegram-id ЭТОЙ группы, если он там
+// есть, иначе null (тогда у профиля просто нет привязанного Telegram — пропускаем).
+const myLinkedId = (u) => u.linkedIds.find(isTgId) || null;
 let broadcasting = false;
 const remindersSent = new Set();
 const PROCESS_START = Date.now();
@@ -1421,7 +1434,7 @@ function startSchedulers() {
 }
 
 async function warmTick() {
-  const subs = storage.subscribers().filter((u) => isTgId(u.userId));
+  const subs = storage.subscribers().filter((u) => myLinkedId(u));
   if (!subs.length) return;
   for (const t of [D.todayParts(), D.tomorrowParts()]) await ss.fetchDayCsv(t, 4 * 60 * 1000).catch(() => {});
 }
@@ -1432,14 +1445,17 @@ async function morningTick() {
   const today = D.todayParts();
   const todayIso = D.iso(today);
   const dow = D.weekdayIso(today);
-  const due = storage.subscribers().filter((u) => {
-    if (!isTgId(u.userId)) return false;
-    if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
-    if (isPaused(u.pausedUntil)) return false;
-    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
-    if (!days.includes(dow)) return false;
-    return u.morningLastSent !== todayIso;
-  });
+  const due = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
+      if (isPaused(u.pausedUntil)) return false;
+      const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+      if (!days.includes(dow)) return false;
+      return storage.getPlatformMorningLastSent(u.myId) !== todayIso;
+    });
   if (!due.length) return;
 
   let csvText = null;
@@ -1484,7 +1500,7 @@ async function morningTick() {
       }
     }
     try {
-      const chatId = u.userId.slice(3);
+      const chatId = u.myId.slice(3);
       await bot.sendMessage(chatId, tm.esc(body));
       if (cfg.weatherEnabled) {
         if (u.away && u.homePlace && u.homeLat != null && u.homeLon != null) {
@@ -1493,16 +1509,16 @@ async function morningTick() {
             const view = tm.buildWeatherPanel({ place: u.homePlace, forecast: homeForecast }, { place: cfg.weatherPlace, forecast: cityForecast || { ranges: [], advice: [] } }, D.iso(today), null);
             await bot.sendMessage(chatId, view.text, { parse_mode: 'HTML' });
           } catch (err) {
-            log('WARN', `погода (дом, ${u.userId}): ${err.message}`);
+            log('WARN', `погода (дом, ${u.myId}): ${err.message}`);
           }
         } else if (cityForecast) {
           await bot.sendMessage(chatId, tm.weatherText(cfg.weatherPlace, cityForecast, null), { parse_mode: 'HTML' }).catch(() => {});
         }
       }
-      storage.setMorningLastSent(u.userId, todayIso);
+      storage.setPlatformMorningLastSent(u.myId, todayIso);
     } catch (err) {
-      if (err && /bot was blocked|chat not found/i.test(err.message || '')) storage.setMorningLastSent(u.userId, todayIso);
-      else log('WARN', `утро ${u.userId}: ${err.message || err}`);
+      if (err && /bot was blocked|chat not found/i.test(err.message || '')) storage.setPlatformMorningLastSent(u.myId, todayIso);
+      else log('WARN', `утро ${u.myId}: ${err.message || err}`);
     }
     await new Promise((r) => setTimeout(r, 60));
   }
@@ -1519,15 +1535,18 @@ async function broadcastTick() {
   storage.purgeExpiredPauses(D.iso(D.todayParts()));
   storage.purgeOldNotes(D.iso(D.todayParts()));
 
-  const due = storage.subscribers().filter((u) => {
-    if (!isTgId(u.userId)) return false;
-    if (isPaused(u.pausedUntil)) return false;
-    const [th, tmn] = String(u.time || cfg.defaultTime).split(':').map(Number);
-    if (nowMin < th * 60 + tmn) return false;
-    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
-    if (!days.includes(dow)) return false;
-    return u.lastSent !== targetIso;
-  });
+  const due = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (isPaused(u.pausedUntil)) return false;
+      const [th, tmn] = String(u.time || cfg.defaultTime).split(':').map(Number);
+      if (nowMin < th * 60 + tmn) return false;
+      const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+      if (!days.includes(dow)) return false;
+      return storage.getPlatformLastSent(u.myId) !== targetIso;
+    });
   if (!due.length) return;
 
   broadcasting = true;
@@ -1592,7 +1611,7 @@ async function runBroadcast(due, target, targetIso) {
       if (data.note === 'no-lessons') {
         payload = { text: tm.esc(weekendTomorrow ? '🎉 Завтра выходной — пар нет, отдыхай!' : '📭 Завтра пар нет.') };
       } else {
-        payload = tm.scheduleMessage(attachNotes(data, u.userId, targetIso), humanUrl, u.format);
+        payload = tm.scheduleMessage(attachNotes(data, u.userId, targetIso), humanUrl, storage.getPlatformFormat(u.myId));
         if (!digestSaved.has(sk)) {
           try {
             const canon = buildDayData(csvText, subj, target, {});
@@ -1605,13 +1624,13 @@ async function runBroadcast(due, target, targetIso) {
       }
     }
     try {
-      await send(u.userId.slice(3), payload);
+      await send(u.myId.slice(3), payload);
       sent += 1;
-      storage.setLastSent(u.userId, targetIso);
+      storage.setPlatformLastSent(u.myId, targetIso);
     } catch (err) {
       skipped += 1;
-      if (err && /bot was blocked|chat not found/i.test(err.message || '')) storage.setLastSent(u.userId, targetIso);
-      else log('WARN', `ЛС ${u.userId}: ${err.message || err}`);
+      if (err && /bot was blocked|chat not found/i.test(err.message || '')) storage.setPlatformLastSent(u.myId, targetIso);
+      else log('WARN', `ЛС ${u.myId}: ${err.message || err}`);
     }
     await new Promise((r) => setTimeout(r, 60));
   }
@@ -1620,7 +1639,10 @@ async function runBroadcast(due, target, targetIso) {
 }
 
 async function reminderTick() {
-  const users = storage.subscribers().filter((u) => isTgId(u.userId) && u.reminderMinutes > 0 && !isPaused(u.pausedUntil));
+  const users = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId && u.reminderMinutes > 0 && !isPaused(u.pausedUntil));
   if (!users.length) return;
   const today = D.todayParts();
   const todayIso = D.iso(today);
@@ -1650,16 +1672,16 @@ async function reminderTick() {
       if (r.kind !== 'lesson' || !r.start) continue;
       const startMin = D.toMinutes(r.start);
       if (startMin == null || startMin - nowMin !== u.reminderMinutes) continue;
-      const dedup = `${u.userId}|${todayIso}|${startMin}`;
+      const dedup = `${u.myId}|${todayIso}|${startMin}`;
       if (remindersSent.has(dedup)) continue;
       remindersSent.add(dedup);
       try {
         const where = r.room ? `, ауд. ${r.room}` : '';
         const who = subj.kind === 'teacher' && r.groupsText ? ` — ${r.groupsText}` : '';
         const note = r.pair != null ? storage.getNotesForDay(u.userId, todayIso)[r.pair] : null;
-        await bot.sendMessage(u.userId.slice(3), `⏰ Через ${u.reminderMinutes} мин пара: ${tm.b(r.subject)}${tm.esc(where)}${tm.esc(who)} (в ${r.start})${note ? `\n📝 ${tm.esc(note)}` : ''}`, { parse_mode: 'HTML' });
+        await bot.sendMessage(u.myId.slice(3), `⏰ Через ${u.reminderMinutes} мин пара: ${tm.b(r.subject)}${tm.esc(where)}${tm.esc(who)} (в ${r.start})${note ? `\n📝 ${tm.esc(note)}` : ''}`, { parse_mode: 'HTML' });
       } catch (err) {
-        if (!/bot was blocked|chat not found/i.test(err.message || '')) log('WARN', `напоминание ${u.userId}: ${err.message || err}`);
+        if (!/bot was blocked|chat not found/i.test(err.message || '')) log('WARN', `напоминание ${u.myId}: ${err.message || err}`);
       }
     }
   }
@@ -1671,14 +1693,17 @@ async function changeTick() {
   storage.purgeDigests(todayIso);
   const entries = storage.digestEntries().filter((e) => e.iso >= todayIso);
   if (!entries.length) return;
-  const subs = storage.subscribers().filter((u) => isTgId(u.userId));
+  const subs = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId);
   for (const { key, group: sk, iso } of entries) {
     const target = D.partsFromIso(iso);
     if (!target) continue;
     const affected = subs.filter((u) => {
       if (isPaused(u.pausedUntil)) return false;
       const subj = subjOf(u);
-      return subj && subjKey(subj) === sk && u.lastSent === iso;
+      return subj && subjKey(subj) === sk && storage.getPlatformLastSent(u.myId) === iso;
     });
     if (!affected.length) continue;
     let csvText;
@@ -1711,11 +1736,11 @@ async function changeTick() {
     for (const u of affected) {
       try {
         const data = buildDayData(csvText, subjOf(u), target, { showGaps: u.showGaps });
-        const body = tm.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, u.format);
-        await bot.sendMessage(u.userId.slice(3), header, { parse_mode: 'HTML' });
-        await send(u.userId.slice(3), body);
+        const body = tm.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, storage.getPlatformFormat(u.myId));
+        await bot.sendMessage(u.myId.slice(3), header, { parse_mode: 'HTML' });
+        await send(u.myId.slice(3), body);
       } catch (err) {
-        if (!/bot was blocked|chat not found/i.test(err.message || '')) log('WARN', `уведомление об изменении ${u.userId}: ${err.message || err}`);
+        if (!/bot was blocked|chat not found/i.test(err.message || '')) log('WARN', `уведомление об изменении ${u.myId}: ${err.message || err}`);
       }
       await new Promise((r) => setTimeout(r, 60));
     }
@@ -1724,14 +1749,15 @@ async function changeTick() {
 
 async function pauseReminderTick() {
   const tomIso = D.iso(D.tomorrowParts());
-  for (const u of storage.subscribers().filter((x) => isTgId(x.userId))) {
-    if (u.pausedUntil !== tomIso || u.pauseEndNotified === tomIso) continue;
+  for (const u of storage.subscribers()) {
+    const myId = myLinkedId(u);
+    if (!myId || u.pausedUntil !== tomIso || storage.getPlatformPauseNotified(myId) === tomIso) continue;
     try {
-      await bot.sendMessage(u.userId.slice(3), `⏸ Пауза заканчивается завтра (${D.fmtDM(D.tomorrowParts())}) — рассылка, утро и напоминания снова включатся.`);
+      await bot.sendMessage(myId.slice(3), `⏸ Пауза заканчивается завтра (${D.fmtDM(D.tomorrowParts())}) — рассылка, утро и напоминания снова включатся.`);
     } catch (err) {
-      if (!/bot was blocked|chat not found/i.test(err.message || '')) log('WARN', `пауза-напоминание ${u.userId}: ${err.message || err}`);
+      if (!/bot was blocked|chat not found/i.test(err.message || '')) log('WARN', `пауза-напоминание ${myId}: ${err.message || err}`);
     }
-    storage.setPauseEndNotified(u.userId, tomIso);
+    storage.setPlatformPauseNotified(myId, tomIso);
   }
 }
 

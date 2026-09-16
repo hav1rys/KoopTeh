@@ -222,14 +222,15 @@ function buildLinkView(linkedIds, extras = {}) {
   }
   if (extras.error === 'not-found') lines.push('\n⚠️ Код не найден или уже истёк (действует 10 минут).');
   else if (extras.error === 'same') lines.push('\n⚠️ Это и так один и тот же профиль.');
-  else if (extras.error === 'is-root') {
-    lines.push('\n⚠️ Этот чат — основной профиль (к нему привязаны другие мессенджеры). Чтобы отвязать конкретный мессенджер, открой его и нажми «✂️ Отвязать» там.');
-  }
   const kb = [
     [{ text: '📎 Получить код для другого мессенджера', callback_data: 'link:code' }],
     [{ text: '⌨️ Ввести код из другого мессенджера', callback_data: 'link:enter' }],
   ];
-  if (linkedIds.length > 1) kb.push([{ text: '✂️ Отвязать этот чат', callback_data: 'link:unlink' }]);
+  // Отвязать можно любой конкретный мессенджер из группы, находясь на любом из
+  // них — включая сам корень (группа тогда просто перекорениться на оставшихся).
+  if (linkedIds.length > 1) {
+    for (const id of linkedIds) kb.push([{ text: `✂️ Отвязать ${PLATFORM_LABEL(id)}`, callback_data: `link:unlink:${id}` }]);
+  }
   kb.push([{ text: '← Назад', callback_data: 'set:back' }]);
   return { text: lines.join('\n'), keyboard: kb };
 }

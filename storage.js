@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const cfg = require('./config');
 
 const FILE = path.resolve(cfg.dataFile);
-let data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {} };
+let data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {}, platformPrefs: {} };
 
 function load() {
   let raw;
@@ -40,16 +40,18 @@ function load() {
       adminLog: Array.isArray(raw.adminLog) ? raw.adminLog : [],
       aliases: isObj(raw.aliases) ? raw.aliases : {},
       linkCodes: isObj(raw.linkCodes) ? raw.linkCodes : {},
+      platformPrefs: isObj(raw.platformPrefs) ? raw.platformPrefs : {},
     };
   } else if (isObj(raw)) {
-    data = { users: raw, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {} };
+    data = { users: raw, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {}, platformPrefs: {} };
   } else {
-    data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {} };
+    data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {}, platformPrefs: {} };
   }
   if (!Array.isArray(data.scheduledAnnouncements)) data.scheduledAnnouncements = [];
   if (!Array.isArray(data.adminLog)) data.adminLog = [];
   if (!isObj(data.aliases)) data.aliases = {};
   if (!isObj(data.linkCodes)) data.linkCodes = {};
+  if (!isObj(data.platformPrefs)) data.platformPrefs = {};
   if (!data.admins.length && cfg.adminId) data.admins = [String(cfg.adminId)];
 }
 
@@ -64,6 +66,12 @@ const rec = (userId) => data.users[userId] || (data.users[userId] = {});
 
 // ---- пользователи --------------------------------------------------
 
+// format/weatherFormat и lastSent/morningLastSent/pauseEndNotified раньше жили
+// здесь, на общем профиле — но связанные аккаунты (/связать) делят один профиль
+// на несколько площадок, а формат вывода и "уже отправляли сегодня" должны быть
+// СВОИ у каждой площадки (иначе, например, включишь картинку в VK — она включится
+// и в Telegram). Поэтому эти поля переехали в data.platformPrefs, по "сырому"
+// id площадки — см. getPlatformFormat/setPlatformFormat и т.д. ниже.
 function get(userId) {
   const r = data.users[userId] || {};
   return {
@@ -74,22 +82,17 @@ function get(userId) {
     time: r.time || null,
     days: Array.isArray(r.days) ? r.days : null,
     showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
-    format: r.format === 'text' || r.format === 'image' ? r.format : 'embed',
     reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
     morning: Boolean(r.morning),
     morningTime: r.morningTime || '07:30',
     morningGreeting: r.morningGreeting || null,
-    morningLastSent: r.morningLastSent || null,
     pausedUntil: r.pausedUntil || null,
-    pauseEndNotified: r.pauseEndNotified || null,
     theme: r.theme || 'default',
     away: Boolean(r.away),
     homePlace: r.homePlace || null,
     homeStop: r.homeStop || null,
     homeLat: typeof r.homeLat === 'number' ? r.homeLat : null,
     homeLon: typeof r.homeLon === 'number' ? r.homeLon : null,
-    weatherFormat: r.weatherFormat === 'text' || r.weatherFormat === 'image' ? r.weatherFormat : 'embed',
-    lastSent: r.lastSent || null,
   };
 }
 
@@ -138,11 +141,6 @@ function setShowGaps(userId, value) {
   save();
 }
 
-function setFormat(userId, format) {
-  rec(userId).format = format === 'text' || format === 'image' ? format : 'embed';
-  save();
-}
-
 function setReminder(userId, minutes) {
   const n = Number(minutes);
   rec(userId).reminderMinutes = Number.isInteger(n) && n > 0 ? n : 0;
@@ -159,11 +157,6 @@ function setMorningTime(userId, hhmm) {
   save();
 }
 
-function setMorningLastSent(userId, iso) {
-  rec(userId).morningLastSent = iso;
-  save();
-}
-
 function setMorningGreeting(userId, text) {
   const r = rec(userId);
   if (text) r.morningGreeting = String(text).slice(0, 200);
@@ -173,11 +166,6 @@ function setMorningGreeting(userId, text) {
 
 function setTheme(userId, theme) {
   rec(userId).theme = theme || 'default';
-  save();
-}
-
-function setWeatherFormat(userId, format) {
-  rec(userId).weatherFormat = format === 'text' || format === 'image' ? format : 'embed';
   save();
 }
 
@@ -216,28 +204,75 @@ function setPausedUntil(userId, iso) {
   const r = rec(userId);
   if (iso) r.pausedUntil = iso;
   else delete r.pausedUntil;
-  delete r.pauseEndNotified;
-  save();
-}
-
-function setPauseEndNotified(userId, iso) {
-  const r = rec(userId);
-  if (iso) r.pauseEndNotified = iso;
-  else delete r.pauseEndNotified;
+  clearPlatformPauseNotified(userId, false);
   save();
 }
 
 /** Убрать истёкшие паузы (день возвращения наступил). */
 function purgeExpiredPauses(todayIso) {
   let changed = false;
-  for (const r of Object.values(data.users)) {
+  for (const [userId, r] of Object.entries(data.users)) {
     if (r && r.pausedUntil && r.pausedUntil <= todayIso) {
       delete r.pausedUntil;
-      delete r.pauseEndNotified;
+      clearPlatformPauseNotified(userId, false);
       changed = true;
     }
   }
   if (changed) save();
+}
+
+// ---- предпочтения КОНКРЕТНОЙ площадки внутри связанной группы -------
+//
+// format/weatherFormat и lastSent/morningLastSent/pauseEndNotified — свои у
+// каждой площадки (Discord/Telegram/VK), даже если аккаунты связаны /связать:
+// иначе включённая в VK картинка включилась бы и в Telegram, а рассылка ушла
+// бы только через одну площадку из трёх. Ключ — "сырой" id площадки (см.
+// resolveUid) — НЕ канонический id профиля.
+
+const platformRec = (rawId) => data.platformPrefs[rawId] || (data.platformPrefs[rawId] = {});
+
+const getPlatformFormat = (rawId) => {
+  const f = (data.platformPrefs[rawId] || {}).format;
+  return f === 'text' || f === 'image' ? f : 'embed';
+};
+function setPlatformFormat(rawId, format) {
+  platformRec(rawId).format = format === 'text' || format === 'image' ? format : 'embed';
+  save();
+}
+
+const getPlatformWeatherFormat = (rawId) => {
+  const f = (data.platformPrefs[rawId] || {}).weatherFormat;
+  return f === 'text' || f === 'image' ? f : 'embed';
+};
+function setPlatformWeatherFormat(rawId, format) {
+  platformRec(rawId).weatherFormat = format === 'text' || format === 'image' ? format : 'embed';
+  save();
+}
+
+const getPlatformLastSent = (rawId) => (data.platformPrefs[rawId] || {}).lastSent || null;
+function setPlatformLastSent(rawId, iso) {
+  platformRec(rawId).lastSent = iso;
+  save();
+}
+
+const getPlatformMorningLastSent = (rawId) => (data.platformPrefs[rawId] || {}).morningLastSent || null;
+function setPlatformMorningLastSent(rawId, iso) {
+  platformRec(rawId).morningLastSent = iso;
+  save();
+}
+
+const getPlatformPauseNotified = (rawId) => (data.platformPrefs[rawId] || {}).pauseEndNotified || null;
+function setPlatformPauseNotified(rawId, iso) {
+  platformRec(rawId).pauseEndNotified = iso;
+  save();
+}
+
+/** Сбросить "уже напомнили про окончание паузы" у ВСЕХ площадок профиля (при смене/снятии паузы). saveNow=false — не писать файл здесь (позовёт вызывающий). */
+function clearPlatformPauseNotified(userId, saveNow = true) {
+  for (const rawId of linkedIds(userId)) {
+    if (data.platformPrefs[rawId]) delete data.platformPrefs[rawId].pauseEndNotified;
+  }
+  if (saveNow) save();
 }
 
 // ---- заметки к парам ({ "<iso>|<pair>": "текст" }) --------------
@@ -280,38 +315,34 @@ function purgeOldNotes(todayIso) {
   if (changed) save();
 }
 
-function setLastSent(userId, iso) {
-  rec(userId).lastSent = iso;
-  save();
-}
-
+// format/weatherFormat/lastSent/morningLastSent/pauseEndNotified здесь больше
+// нет — они per-platform (см. getPlatformFormat и т.д. выше). Вместо этого —
+// linkedIds: все "сырые" id площадок этого профиля, каждый бот сам находит в
+// нём id своей площадки (isTgId/isVkId/иначе) и по нему уже спрашивает
+// storage.getPlatformFormat/getPlatformLastSent и т.д.
 function subscribers() {
   return Object.entries(data.users)
     .filter(([, r]) => r && (r.group || r.teacherName) && r.subscribed)
     .map(([userId, r]) => ({
       userId,
+      linkedIds: linkedIds(userId),
       group: r.group || null,
       teacherName: r.teacherName || null,
       role: r.role === 'teacher' ? 'teacher' : 'student',
       time: r.time || null,
       days: Array.isArray(r.days) ? r.days : null,
       showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
-      format: r.format === 'text' || r.format === 'image' ? r.format : 'embed',
       reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
       morning: Boolean(r.morning),
       morningTime: r.morningTime || '07:30',
       morningGreeting: r.morningGreeting || null,
-      morningLastSent: r.morningLastSent || null,
       pausedUntil: r.pausedUntil || null,
-      pauseEndNotified: r.pauseEndNotified || null,
       theme: r.theme || 'default',
       away: Boolean(r.away),
       homePlace: r.homePlace || null,
       homeStop: r.homeStop || null,
       homeLat: typeof r.homeLat === 'number' ? r.homeLat : null,
       homeLon: typeof r.homeLon === 'number' ? r.homeLon : null,
-      weatherFormat: r.weatherFormat === 'text' || r.weatherFormat === 'image' ? r.weatherFormat : 'embed',
-      lastSent: r.lastSent || null,
     }));
 }
 
@@ -509,11 +540,34 @@ function linkedIds(rawUid) {
   return [...new Set([canonical, ...others])];
 }
 
-/** Отвязать rawUid от его канонического профиля (снова становится своим собственным). */
-function unlinkPlatform(rawUid) {
-  const id = String(rawUid);
-  if (!data.aliases[id]) return false;
-  delete data.aliases[id];
+/**
+ * Отвязать targetId от той же группы, что и rawUid (не обязательно себя — можно
+ * отвязать ЛЮБОЙ другой мессенджер из группы, находясь на любом из них).
+ * Если targetId — сам канонический id (корень группы), группа не разваливается:
+ * один из оставшихся alias'ов становится новым корнем (данные профиля физически
+ * переносятся на него), а старый корень становится независимым, пустым профилем.
+ * Возвращает true, если что-то реально отвязалось.
+ */
+function unlinkId(rawUid, targetId) {
+  const canonical = resolveUid(rawUid);
+  const target = String(targetId);
+  if (target === canonical) {
+    const others = Object.entries(data.aliases)
+      .filter(([, t]) => String(t) === canonical)
+      .map(([id]) => id);
+    if (!others.length) return false; // группа и так из одного профиля — отвязывать нечего
+    const [newRoot, ...rest] = others;
+    delete data.aliases[newRoot];
+    for (const id of rest) data.aliases[id] = newRoot;
+    if (data.users[canonical]) {
+      data.users[newRoot] = data.users[canonical];
+      delete data.users[canonical];
+    }
+    save();
+    return true;
+  }
+  if (data.aliases[target] !== canonical) return false; // targetId не из этой группы
+  delete data.aliases[target];
   save();
   return true;
 }
@@ -553,24 +607,29 @@ module.exports = {
   setTime,
   setDays,
   setShowGaps,
-  setFormat,
   setReminder,
   setMorning,
   setMorningTime,
-  setMorningLastSent,
   setMorningGreeting,
   setTheme,
-  setWeatherFormat,
   setAway,
   setHomePlace,
   setHomeStop,
   setPausedUntil,
-  setPauseEndNotified,
   purgeExpiredPauses,
   getNotesForDay,
   setNote,
   purgeOldNotes,
-  setLastSent,
+  getPlatformFormat,
+  setPlatformFormat,
+  getPlatformWeatherFormat,
+  setPlatformWeatherFormat,
+  getPlatformLastSent,
+  setPlatformLastSent,
+  getPlatformMorningLastSent,
+  setPlatformMorningLastSent,
+  getPlatformPauseNotified,
+  setPlatformPauseNotified,
   subscribers,
   addQuestion,
   getQuestion,
@@ -590,7 +649,7 @@ module.exports = {
   createLinkCode,
   redeemLinkCode,
   linkedIds,
-  unlinkPlatform,
+  unlinkId,
   addScheduledAnnounce,
   listScheduledAnnounces,
   removeScheduledAnnounce,

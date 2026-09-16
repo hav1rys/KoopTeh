@@ -327,21 +327,22 @@ function buildLinkView(linkedIds, extras = {}) {
   if (extras.code) lines.push(`\n📎 Код: \`${extras.code}\`\nВведи его в другом мессенджере (там тоже есть кнопка «🔗 Связать») в течение 10 минут.`);
   if (extras.error === 'not-found') lines.push('\n⚠️ Код не найден или уже истёк (действует 10 минут).');
   else if (extras.error === 'same') lines.push('\n⚠️ Это и так один и тот же профиль.');
-  else if (extras.error === 'is-root') {
-    lines.push('\n⚠️ Этот аккаунт — основной профиль (к нему привязаны другие мессенджеры). Чтобы отвязать конкретный мессенджер, открой его и нажми «✂️ Отвязать» там.');
-  }
   const embed = new EmbedBuilder().setColor(C.weekday).setTitle('🔗 Связь с другими мессенджерами').setDescription(lines.join('\n'));
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('link:code').setLabel('📎 Получить код').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('link:enter').setLabel('⌨️ Ввести код').setStyle(ButtonStyle.Secondary),
   );
   const rows = [row1];
+  // Отвязать можно ЛЮБОЙ конкретный мессенджер из группы, находясь на любом из
+  // них — включая сам корень (группа тогда просто перекорениться на оставшихся).
   if (linkedIds.length > 1) {
-    rows.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('link:unlink').setLabel('✂️ Отвязать этот аккаунт').setStyle(ButtonStyle.Danger),
-      ),
-    );
+    for (const id of linkedIds) {
+      rows.push(
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`link:unlink:${id}`).setLabel(`✂️ Отвязать ${PLATFORM_LABEL(id)}`).setStyle(ButtonStyle.Danger),
+        ),
+      );
+    }
   }
   rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('set:back').setLabel('← Назад').setStyle(ButtonStyle.Secondary)));
   return { content: '', embeds: [embed], files: [], components: rows };

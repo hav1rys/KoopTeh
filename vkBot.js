@@ -87,7 +87,11 @@ function buildDayData(csvText, subj, target, opts = {}) {
   return subj.kind === 'teacher' ? ss.buildTeacherData(csvText, subj.name, target) : ss.buildScheduleData(csvText, subj.name, target, opts);
 }
 
-function effState(rawUid) {
+// platformRawId — "сырой" (непривязанный) id ИМЕННО этого VK-диалога — нужен
+// только для format/weatherFormat: они свои у каждой площадки, даже если
+// аккаунты связаны /связать (см. storage.js). Необязателен — если не передать,
+// используется rawUid (при отсутствии связывания это одно и то же).
+function effState(rawUid, platformRawId = rawUid) {
   const s = storage.get(rawUid);
   return {
     group: s.group,
@@ -99,7 +103,7 @@ function effState(rawUid) {
     customTime: Boolean(s.time),
     days: Array.isArray(s.days) ? s.days : cfg.defaultDays,
     showGaps: s.showGaps,
-    format: s.format,
+    format: storage.getPlatformFormat(platformRawId),
     reminderMinutes: s.reminderMinutes,
     morning: s.morning,
     morningTime: s.morningTime,
@@ -110,7 +114,7 @@ function effState(rawUid) {
     homeStop: s.homeStop,
     homeLat: s.homeLat,
     homeLon: s.homeLon,
-    weatherFormat: s.weatherFormat || 'embed',
+    weatherFormat: storage.getPlatformWeatherFormat(platformRawId),
   };
 }
 
@@ -500,7 +504,7 @@ async function handleEvent(context) {
 }
 
 async function onMenuButton(peerId, cmid, rawUid, action, ack) {
-  const s = effState(rawUid);
+  const s = effState(rawUid, rawId(peerId));
   switch (action) {
     case 'schedule': {
       if (!s.subj) return void ack('Сначала укажи группу или фамилию (👤 Роль).');
@@ -585,9 +589,9 @@ async function onMenuButton(peerId, cmid, rawUid, action, ack) {
 }
 
 async function onSettingsButton(peerId, cmid, rawUid, rest, ack) {
-  const s = effState(rawUid);
-  const back = () => render(peerId, cmid, vm.buildSettingsView(effState(rawUid)));
-  const backMore = () => render(peerId, cmid, vm.buildSettingsMoreView(effState(rawUid)));
+  const s = effState(rawUid, rawId(peerId));
+  const back = () => render(peerId, cmid, vm.buildSettingsView(effState(rawUid, rawId(peerId))));
+  const backMore = () => render(peerId, cmid, vm.buildSettingsMoreView(effState(rawUid, rawId(peerId))));
   switch (rest) {
     case 'back':
       await ack();
@@ -623,11 +627,11 @@ async function onSettingsButton(peerId, cmid, rawUid, rest, ack) {
       await ack();
       return void (await backMore());
     case 'format':
-      storage.setFormat(rawUid, vm.nextFormat(s.format));
+      storage.setPlatformFormat(rawId(peerId), vm.nextFormat(s.format));
       await ack();
       return void (await backMore());
     case 'wthrformat':
-      storage.setWeatherFormat(rawUid, vm.nextFormat(s.weatherFormat));
+      storage.setPlatformWeatherFormat(rawId(peerId), vm.nextFormat(s.weatherFormat));
       await ack();
       return void (await backMore());
     case 'time':
@@ -688,10 +692,11 @@ async function onLinkButton(peerId, cmid, rawUid, rest, ack) {
     await send(peerId, { text: 'Пришли код (6 символов), который показал бот в другом мессенджере:' });
     return;
   }
-  if (rest === 'unlink') {
-    const ok = storage.unlinkPlatform(rawId(peerId));
+  if (rest.startsWith('unlink:')) {
+    const targetId = rest.slice('unlink:'.length);
+    const ok = storage.unlinkId(rawId(peerId), targetId);
     await ack(ok ? 'Отвязано.' : undefined);
-    return void (await render(peerId, cmid, vm.buildLinkView(storage.linkedIds(uid(peerId)), ok ? {} : { error: 'is-root' })));
+    return void (await render(peerId, cmid, vm.buildLinkView(storage.linkedIds(uid(peerId)))));
   }
   await ack();
 }
@@ -868,7 +873,7 @@ async function onGroupButton(peerId, cmid, rawUid, rest, ack) {
 }
 
 async function renderSchedule(peerId, cmid, rawUid, target) {
-  const s = effState(rawUid);
+  const s = effState(rawUid, rawId(peerId));
   const { data, url, error } = await safeSchedule(s.subj, target, s.showGaps);
   const withNotes = data ? attachNotes(data, rawUid, D.iso(target)) : data;
   const base = error ? { text: error } : vm.scheduleMessage(withNotes, url, s.format);
@@ -877,7 +882,7 @@ async function renderSchedule(peerId, cmid, rawUid, target) {
 }
 
 async function onScheduleButton(peerId, cmid, rawUid, rest, ack) {
-  const s = effState(rawUid);
+  const s = effState(rawUid, rawId(peerId));
   if (rest === 'menu') {
     await ack();
     return void (await render(peerId, cmid, menuView(rawUid)));
@@ -1080,16 +1085,19 @@ async function onAdminButton(peerId, cmid, rawUid, rest, ack) {
 /** Разослать объявление подписчикам этой платформы (всем или одной группе). */
 async function broadcastAnnouncement(text, group) {
   const wantG = group ? ss.normGroup(group) : null;
-  const subs = storage.subscribers().filter((u) => {
-    if (!String(u.userId).startsWith('vk:')) return false;
-    if (!wantG) return true;
-    return u.group && u.role !== 'teacher' && ss.normGroup(u.group) === wantG;
-  });
+  const subs = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (!wantG) return true;
+      return u.group && u.role !== 'teacher' && ss.normGroup(u.group) === wantG;
+    });
   let ok = 0;
   let fail = 0;
   for (const u of subs) {
     try {
-      await send(u.userId.slice(3), { text: `📢 Объявление\n\n${text}` });
+      await send(u.myId.slice(3), { text: `📢 Объявление\n\n${text}` });
       ok += 1;
     } catch {
       fail += 1;
@@ -1175,7 +1183,7 @@ async function handleMessage(context) {
   }
   const schM = /^расписание(?=\s|$)\s*(.*)$/i.exec(text);
   if (schM) {
-    const s = effState(rawUid);
+    const s = effState(rawUid, rawId(peerId));
     if (!s.subj) return void send(peerId, { text: 'Сначала укажи группу (напиши «начать»), либо напиши «расписание дд.мм».' });
     const arg = (schM[1] || '').trim();
     const target = arg ? parseDateField(arg) : D.todayParts();
@@ -1435,6 +1443,10 @@ async function handleAwaitingText(peerId, rawUid, pending, text) {
 // --------------------------------------------------------- планировщики (как в telegramBot.js, только VK-адресаты)
 
 const isVkId = (id) => String(id).startsWith('vk:');
+// u — запись из storage.subscribers() (может быть общим профилем на несколько
+// связанных площадок); возвращает "сырой" VK-id ЭТОЙ группы, если он там есть,
+// иначе null (тогда у профиля просто нет привязанного VK — пропускаем).
+const myLinkedId = (u) => u.linkedIds.find(isVkId) || null;
 let broadcasting = false;
 const remindersSent = new Set();
 const PROCESS_START = Date.now();
@@ -1455,7 +1467,7 @@ function startSchedulers() {
 }
 
 async function warmTick() {
-  const subs = storage.subscribers().filter((u) => isVkId(u.userId));
+  const subs = storage.subscribers().filter((u) => myLinkedId(u));
   if (!subs.length) return;
   for (const t of [D.todayParts(), D.tomorrowParts()]) await ss.fetchDayCsv(t, 4 * 60 * 1000).catch(() => {});
 }
@@ -1466,14 +1478,17 @@ async function morningTick() {
   const today = D.todayParts();
   const todayIso = D.iso(today);
   const dow = D.weekdayIso(today);
-  const due = storage.subscribers().filter((u) => {
-    if (!isVkId(u.userId)) return false;
-    if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
-    if (isPaused(u.pausedUntil)) return false;
-    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
-    if (!days.includes(dow)) return false;
-    return u.morningLastSent !== todayIso;
-  });
+  const due = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (!u.morning || (u.morningTime || '07:30') !== hhmm) return false;
+      if (isPaused(u.pausedUntil)) return false;
+      const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+      if (!days.includes(dow)) return false;
+      return storage.getPlatformMorningLastSent(u.myId) !== todayIso;
+    });
   if (!due.length) return;
 
   let csvText = null;
@@ -1518,7 +1533,7 @@ async function morningTick() {
       }
     }
     try {
-      const peerId = u.userId.slice(3);
+      const peerId = u.myId.slice(3);
       await send(peerId, { text: body });
       if (cfg.weatherEnabled) {
         if (u.away && u.homePlace && u.homeLat != null && u.homeLon != null) {
@@ -1527,15 +1542,15 @@ async function morningTick() {
             const view = vm.buildWeatherPanel({ place: u.homePlace, forecast: homeForecast }, { place: cfg.weatherPlace, forecast: cityForecast || { ranges: [], advice: [] } }, D.iso(today), null);
             await send(peerId, { text: view.text });
           } catch (err) {
-            log('WARN', `погода (дом, ${u.userId}): ${err.message}`);
+            log('WARN', `погода (дом, ${u.myId}): ${err.message}`);
           }
         } else if (cityForecast) {
           await send(peerId, { text: vm.weatherText(cfg.weatherPlace, cityForecast, null) }).catch(() => {});
         }
       }
-      storage.setMorningLastSent(u.userId, todayIso);
+      storage.setPlatformMorningLastSent(u.myId, todayIso);
     } catch (err) {
-      log('WARN', `утро ${u.userId}: ${err.message || err}`);
+      log('WARN', `утро ${u.myId}: ${err.message || err}`);
     }
     await new Promise((r) => setTimeout(r, 60));
   }
@@ -1552,15 +1567,18 @@ async function broadcastTick() {
   storage.purgeExpiredPauses(D.iso(D.todayParts()));
   storage.purgeOldNotes(D.iso(D.todayParts()));
 
-  const due = storage.subscribers().filter((u) => {
-    if (!isVkId(u.userId)) return false;
-    if (isPaused(u.pausedUntil)) return false;
-    const [th, tmn] = String(u.time || cfg.defaultTime).split(':').map(Number);
-    if (nowMin < th * 60 + tmn) return false;
-    const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
-    if (!days.includes(dow)) return false;
-    return u.lastSent !== targetIso;
-  });
+  const due = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => {
+      if (!u.myId) return false;
+      if (isPaused(u.pausedUntil)) return false;
+      const [th, tmn] = String(u.time || cfg.defaultTime).split(':').map(Number);
+      if (nowMin < th * 60 + tmn) return false;
+      const days = Array.isArray(u.days) ? u.days : cfg.defaultDays;
+      if (!days.includes(dow)) return false;
+      return storage.getPlatformLastSent(u.myId) !== targetIso;
+    });
   if (!due.length) return;
 
   broadcasting = true;
@@ -1625,7 +1643,7 @@ async function runBroadcast(due, target, targetIso) {
       if (data.note === 'no-lessons') {
         payload = { text: weekendTomorrow ? '🎉 Завтра выходной — пар нет, отдыхай!' : '📭 Завтра пар нет.' };
       } else {
-        payload = vm.scheduleMessage(attachNotes(data, u.userId, targetIso), humanUrl, u.format);
+        payload = vm.scheduleMessage(attachNotes(data, u.userId, targetIso), humanUrl, storage.getPlatformFormat(u.myId));
         if (!digestSaved.has(sk)) {
           try {
             const canon = buildDayData(csvText, subj, target, {});
@@ -1638,12 +1656,12 @@ async function runBroadcast(due, target, targetIso) {
       }
     }
     try {
-      await send(u.userId.slice(3), payload);
+      await send(u.myId.slice(3), payload);
       sent += 1;
-      storage.setLastSent(u.userId, targetIso);
+      storage.setPlatformLastSent(u.myId, targetIso);
     } catch (err) {
       skipped += 1;
-      log('WARN', `ЛС ${u.userId}: ${err.message || err}`);
+      log('WARN', `ЛС ${u.myId}: ${err.message || err}`);
     }
     await new Promise((r) => setTimeout(r, 60));
   }
@@ -1652,7 +1670,10 @@ async function runBroadcast(due, target, targetIso) {
 }
 
 async function reminderTick() {
-  const users = storage.subscribers().filter((u) => isVkId(u.userId) && u.reminderMinutes > 0 && !isPaused(u.pausedUntil));
+  const users = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId && u.reminderMinutes > 0 && !isPaused(u.pausedUntil));
   if (!users.length) return;
   const today = D.todayParts();
   const todayIso = D.iso(today);
@@ -1682,16 +1703,16 @@ async function reminderTick() {
       if (r.kind !== 'lesson' || !r.start) continue;
       const startMin = D.toMinutes(r.start);
       if (startMin == null || startMin - nowMin !== u.reminderMinutes) continue;
-      const dedup = `${u.userId}|${todayIso}|${startMin}`;
+      const dedup = `${u.myId}|${todayIso}|${startMin}`;
       if (remindersSent.has(dedup)) continue;
       remindersSent.add(dedup);
       try {
         const where = r.room ? `, ауд. ${r.room}` : '';
         const who = subj.kind === 'teacher' && r.groupsText ? ` — ${r.groupsText}` : '';
         const note = r.pair != null ? storage.getNotesForDay(u.userId, todayIso)[r.pair] : null;
-        await send(u.userId.slice(3), { text: `⏰ Через ${u.reminderMinutes} мин пара: ${r.subject}${where}${who} (в ${r.start})${note ? `\n📝 ${note}` : ''}` });
+        await send(u.myId.slice(3), { text: `⏰ Через ${u.reminderMinutes} мин пара: ${r.subject}${where}${who} (в ${r.start})${note ? `\n📝 ${note}` : ''}` });
       } catch (err) {
-        log('WARN', `напоминание ${u.userId}: ${err.message || err}`);
+        log('WARN', `напоминание ${u.myId}: ${err.message || err}`);
       }
     }
   }
@@ -1703,14 +1724,17 @@ async function changeTick() {
   storage.purgeDigests(todayIso);
   const entries = storage.digestEntries().filter((e) => e.iso >= todayIso);
   if (!entries.length) return;
-  const subs = storage.subscribers().filter((u) => isVkId(u.userId));
+  const subs = storage
+    .subscribers()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId);
   for (const { key, group: sk, iso } of entries) {
     const target = D.partsFromIso(iso);
     if (!target) continue;
     const affected = subs.filter((u) => {
       if (isPaused(u.pausedUntil)) return false;
       const subj = subjOf(u);
-      return subj && subjKey(subj) === sk && u.lastSent === iso;
+      return subj && subjKey(subj) === sk && storage.getPlatformLastSent(u.myId) === iso;
     });
     if (!affected.length) continue;
     let csvText;
@@ -1743,11 +1767,11 @@ async function changeTick() {
     for (const u of affected) {
       try {
         const data = buildDayData(csvText, subjOf(u), target, { showGaps: u.showGaps });
-        const body = vm.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, u.format);
-        await send(u.userId.slice(3), { text: header });
-        await send(u.userId.slice(3), body);
+        const body = vm.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, storage.getPlatformFormat(u.myId));
+        await send(u.myId.slice(3), { text: header });
+        await send(u.myId.slice(3), body);
       } catch (err) {
-        log('WARN', `уведомление об изменении ${u.userId}: ${err.message || err}`);
+        log('WARN', `уведомление об изменении ${u.myId}: ${err.message || err}`);
       }
       await new Promise((r) => setTimeout(r, 60));
     }
@@ -1756,14 +1780,15 @@ async function changeTick() {
 
 async function pauseReminderTick() {
   const tomIso = D.iso(D.tomorrowParts());
-  for (const u of storage.subscribers().filter((x) => isVkId(x.userId))) {
-    if (u.pausedUntil !== tomIso || u.pauseEndNotified === tomIso) continue;
+  for (const u of storage.subscribers()) {
+    const myId = myLinkedId(u);
+    if (!myId || u.pausedUntil !== tomIso || storage.getPlatformPauseNotified(myId) === tomIso) continue;
     try {
-      await send(u.userId.slice(3), { text: `⏸ Пауза заканчивается завтра (${D.fmtDM(D.tomorrowParts())}) — рассылка, утро и напоминания снова включатся.` });
+      await send(myId.slice(3), { text: `⏸ Пауза заканчивается завтра (${D.fmtDM(D.tomorrowParts())}) — рассылка, утро и напоминания снова включатся.` });
     } catch (err) {
-      log('WARN', `пауза-напоминание ${u.userId}: ${err.message || err}`);
+      log('WARN', `пауза-напоминание ${myId}: ${err.message || err}`);
     }
-    storage.setPauseEndNotified(u.userId, tomIso);
+    storage.setPlatformPauseNotified(myId, tomIso);
   }
 }
 
