@@ -1098,6 +1098,10 @@ vk.updates.on('message_new', async (context) => {
 });
 
 async function handleMessage(context) {
+  log(
+    'INFO',
+    `входящее: peerId=${context.peerId} senderId=${context.senderId} isOutbox=${context.isOutbox} isChat=${context.isChat} isFromUser=${context.isFromUser} hasText=${context.hasText} text=${JSON.stringify(context.text)}`,
+  );
   if (context.isOutbox || context.isChat || !context.isFromUser || !context.hasText) return;
   const peerId = context.peerId;
   const rawUid = uid(peerId);
