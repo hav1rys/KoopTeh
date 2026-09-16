@@ -12,12 +12,14 @@
     "start": "node bot.js",
     "discord": "node index.js",
     "telegram": "node telegramBot.js",
+    "vk": "node vkBot.js",
     "test": "node --test",
     "schedule": "node scheduleSource.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "vk-io": "^4.10.1"
   },
   "optionalDependencies": {
     "@napi-rs/canvas": "^0.1.0",

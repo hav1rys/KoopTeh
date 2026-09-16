@@ -121,11 +121,16 @@ module.exports = {
   yandexCityCode: (process.env.YANDEX_CITY_CODE || 'c18').trim(),
   yandexHomeCode: (process.env.YANDEX_HOME_CODE || 'c85997').trim(),
 
-  // Telegram-бот — отдельный процесс (npm run telegram / telegramBot.js), запускается
-  // как отдельный сервис BotHost со своим DATA_FILE/DATA_DIR (см. README) — чтобы не
-  // писать в тот же users.json из двух процессов одновременно.
+  // Telegram- и VK-боты обычно подключаются вместе с Discord-ботом из bot.js —
+  // один процесс, общий users.json (см. bot.js). Каждый включается своим токеном;
+  // можно запускать и по отдельности (npm run telegram / npm run vk).
   telegramToken: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
   telegramAdminId: (process.env.TELEGRAM_ADMIN_ID || '').trim(),
+
+  // VK-бот — токен сообщества (Управление сообществом → Работа с API → Ключи
+  // доступа → Создать токен, права "Сообщения"), не токен пользователя.
+  vkToken: (process.env.VK_BOT_TOKEN || '').trim(),
+  vkAdminId: (process.env.VK_ADMIN_ID || '').trim(),
 
   dataFile: resolveDataFile(),
   guildId: (process.env.GUILD_ID || '').trim() || null,
