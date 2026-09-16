@@ -22,7 +22,11 @@ const code = (s) => String(s ?? '');
 
 const DAYS_RU = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const REMINDER_OPTS = [0, 5, 10, 15, 20, 30, 60];
-const GROUPS_PER_PAGE = 16;
+// У VK гораздо более жёсткий лимит на инлайн-клавиатуру, чем у Telegram/Discord
+// (сервер VK отдаёт "Code №911 - too much buttons" уже на 6 строках/14 кнопках) —
+// поэтому здесь заметно меньше групп на страницу и меньше строк в списках ниже,
+// чем в telegramMenu.js/menu.js.
+const GROUPS_PER_PAGE = 6;
 
 function daysLabel(days) {
   if (!days || !days.length) return '— (не присылать)';
@@ -193,8 +197,10 @@ function buildSettingsView(s) {
       { text: `Формат: ${fmtLabel(s.format)}`, callback_data: 'set:format' },
       { text: `Погода: ${fmtLabel(s.weatherFormat)}`, callback_data: 'set:wthrformat' },
     ],
-    [{ text: '🔗 Связать с Discord/Telegram', callback_data: 'set:link' }],
-    [{ text: '← В меню', callback_data: 'set:back' }],
+    [
+      { text: '🔗 Связать', callback_data: 'set:link' },
+      { text: '← В меню', callback_data: 'set:back' },
+    ],
   ];
   return { text: lines.join('\n'), keyboard: kb };
 }
@@ -753,7 +759,7 @@ function buildSchedAnnView(list) {
     list.map((x) => `• ${x.id} — ${isoToDM(x.atIso)} ${x.atHHMM} · ${x.group || 'всем'}\n  ${String(x.text).replace(/\n/g, ' ').slice(0, 80)}`).join('\n') ||
     'Запланированных объявлений нет.';
   const kb = [[{ text: '➕ Запланировать', callback_data: 'adm:schann:add' }, { text: '← Назад', callback_data: 'adm:menu' }]];
-  for (let i = 0; i < list.length && kb.length < 6; i += 3) {
+  for (let i = 0; i < list.length && kb.length < 4; i += 3) {
     kb.push(list.slice(i, i + 3).map((x) => ({ text: `✖ ${x.id}`, callback_data: `adm:schann:del:${x.id}` })));
   }
   return { text: `🕓 Отложенные объявления\n${body}`.slice(0, 4000), keyboard: kb };
@@ -793,7 +799,7 @@ function buildStatsView(s) {
 function buildAdminsView(adminIds, selfId) {
   const text = ['👥 Администраторы', adminIds.map((id) => `• ${id}${id === String(selfId) ? ' (ты)' : ''}`).join('\n') || '—'].join('\n');
   const kb = [[{ text: '➕ Добавить', callback_data: 'adm:addadmin' }, { text: '← Назад', callback_data: 'adm:menu' }]];
-  for (let i = 0; i < adminIds.length && kb.length < 6; i += 3) {
+  for (let i = 0; i < adminIds.length && kb.length < 4; i += 3) {
     kb.push(adminIds.slice(i, i + 3).map((id) => ({ text: `✖ …${String(id).slice(-4)}`, callback_data: `adm:del:${id}` })));
   }
   return { text, keyboard: kb };

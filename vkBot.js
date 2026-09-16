@@ -184,16 +184,27 @@ const vk = new VK({ token: cfg.vkToken });
 const randomId = () => Math.floor(Math.random() * 2 ** 31) - 2 ** 30;
 
 /** {text, callback_data}[][] (как в telegramMenu.js) -> реальная inline-клавиатура VK. */
+// VK живьём отдаёт "Code №911 - too much buttons" уже на 6 строках/14 кнопках —
+// заметно жёстче, чем у Telegram/Discord. Экраны в vkMenu.js уже подогнаны под
+// этот лимит, но на случай, если где-то всё равно наберётся больше строк,
+// подрезаем здесь защитно — и сохраняем ПОСЛЕДНЮЮ строку (обычно «Назад»),
+// чтобы не потерять выход из экрана, даже если что-то посередине обрежется.
+const MAX_VK_KB_ROWS = 5;
+
 function toVkKeyboard(rows) {
   if (!rows || !rows.length) return null;
+  let use = rows;
+  if (rows.length > MAX_VK_KB_ROWS) {
+    use = [...rows.slice(0, MAX_VK_KB_ROWS - 1), rows[rows.length - 1]];
+  }
   const kb = Keyboard.builder().inline();
-  for (let i = 0; i < rows.length; i++) {
-    for (const btn of rows[i]) {
+  for (let i = 0; i < use.length; i++) {
+    for (const btn of use[i]) {
       const cb = btn.callback_data;
       if (!cb || cb === 'noop') continue;
       kb.callbackButton({ label: String(btn.text).slice(0, 40), payload: { d: cb } });
     }
-    if (i < rows.length - 1) kb.row();
+    if (i < use.length - 1) kb.row();
   }
   return kb;
 }
