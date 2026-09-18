@@ -28,6 +28,7 @@ const storage = require('./storage');
 const ss = require('./scheduleSource');
 const weather = require('./weather');
 const bus = require('./busSource');
+const commute = require('./commute');
 const vm = require('./vkMenu');
 const discordLog = require('./discordLog');
 const bridge = require('./platformBridge');
@@ -241,6 +242,7 @@ async function uploadPhoto(buffer) {
 /** Единый рендер payload'а {text|photo, keyboard} — редактирует cmid, если можно, иначе шлёт новое. */
 async function render(peerId, cmid, payload) {
   const kb = toVkKeyboard(payload.keyboard);
+  if (kb) log('INFO', `клавиатура: строк=${payload.keyboard.length} кнопок=${payload.keyboard.reduce((n, r) => n + r.filter((b) => b.callback_data && b.callback_data !== 'noop').length, 0)} json=${String(kb)}`);
   if (payload.photo) {
     let attachment;
     try {
@@ -276,20 +278,14 @@ async function render(peerId, cmid, payload) {
   return sent;
 }
 
-/** Новое сообщение (не редактирует) — для «Прислать отдельно», рассылок и т.д. */
-async function send(peerId, payload) {
-  if (payload.photo) {
-    let attachment;
-    try {
-      attachment = await uploadPhoto(payload.photo);
-    } catch (err) {
-      log('WARN', `загрузка фото: ${err.message}`);
-      return vk.api.messages.send({ peer_id: peerId, message: (payload.caption || '').slice(0, 4000), random_id: randomId() });
-    }
-    return vk.api.messages.send({ peer_id: peerId, message: (payload.caption || '').slice(0, 900), attachment, random_id: randomId() });
-  }
-  return vk.api.messages.send({ peer_id: peerId, message: (payload.text || '').slice(0, 4000), random_id: randomId() });
-}
+/** Новое сообщение (не редактирует) — для «Прислать отдельно», рассылок и т.д.
+ * ВАЖНО: это просто render() без cmid — раньше здесь клавиатура молча
+ * терялась (payload.keyboard игнорировался), из-за чего у «админ», «звонки»,
+ * «помощь» и много каких экранов после текстового ввода кнопки не появлялись
+ * вообще. render(peerId, null, payload) уже умеет то же самое (отправить новое
+ * сообщение) и корректно прикладывает клавиатуру — дублировать эту логику
+ * незачем. */
+const send = (peerId, payload) => render(peerId, null, payload);
 
 const awaiting = new Map();
 const groupCache = new Map();
@@ -399,18 +395,40 @@ async function renderWeek(peerId, cmid, rawUid, mondayParts) {
   await render(peerId, cmid, view);
 }
 
+/** Окна для подсветки погоды (выход из дома / возвращение / учёба) — рейсы уже кэшированы loadBusData, расписание — best-effort. */
+async function commuteWindowsFor(rawUid, s, target) {
+  try {
+    const busData = await loadBusData(rawUid, s);
+    let lessons = null;
+    if (s.subj) {
+      try {
+        const { csvText } = await ss.fetchDayCsv(target, 4 * 60 * 1000);
+        const data = buildDayData(csvText, s.subj, target, {});
+        if (data && !data.note) lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
+      } catch {
+        /* нет расписания на этот день — окно учёбы просто не подсветится */
+      }
+    }
+    return { busData, windows: commute.weatherHighlightWindows({ toCityRows: busData.toCityRows, toHomeRows: busData.toHomeRows, target, lessons }) };
+  } catch {
+    return { busData: null, windows: [] };
+  }
+}
+
 async function renderWeatherView(peerId, cmid, rawUid, targetIso) {
   const s = effState(rawUid);
   try {
     const cityForecast = await weather.dayForecast(cfg.weatherLat, cfg.weatherLon, targetIso);
+    const t = D.partsFromIso(targetIso) || D.todayParts();
     let homeInfo = null;
+    let highlightWindows = [];
     if (s.away && s.homePlace && s.homeLat != null && s.homeLon != null) {
       const homeForecast = await weather.dayForecast(s.homeLat, s.homeLon, targetIso);
       homeInfo = { place: s.homePlace, forecast: homeForecast };
+      highlightWindows = (await commuteWindowsFor(rawUid, s, t)).windows;
     }
-    const t = D.partsFromIso(targetIso) || D.todayParts();
     const dateLabel = `${D.fmtDM(t)} (${D.weekdayRu(t)})`;
-    const view = vm.buildWeatherPanel(homeInfo, { place: cfg.weatherPlace, forecast: cityForecast }, targetIso, dateLabel);
+    const view = vm.buildWeatherPanel(homeInfo, { place: cfg.weatherPlace, forecast: cityForecast }, targetIso, dateLabel, highlightWindows);
     await render(peerId, cmid, view);
   } catch (err) {
     log('WARN', `погода: ${err.message}`);
@@ -478,6 +496,7 @@ async function handleEvent(context) {
   const payload = context.eventPayload || {};
   const data = String(payload.d || '');
   const [prefix] = data.split(':');
+  log('INFO', `кнопка: peerId=${peerId} cmid=${cmid} data=${JSON.stringify(data)}`);
 
   const ack = (text) => context.answer({ type: 'show_snackbar', text: text || '' }).catch(() => {});
 
@@ -820,7 +839,16 @@ async function openGroupPicker(peerId, cmid, rawUid) {
     log('WARN', `список групп: ${err.message}`);
     view = vm.buildGroupPicker([], 0, { error: 'Не удалось загрузить список групп с сайта. Введи название вручную.' });
   }
-  await render(peerId, cmid, view);
+  try {
+    await render(peerId, cmid, view);
+  } catch (err) {
+    // Клавиатура выбора группы — самая большая в боте; если VK всё равно её
+    // отклонит (см. MAX_VK_KB_ROWS), не роняем весь обработчик, а откатываемся
+    // на ручной ввод — так пользователь не застревает на "⏳ Загружаю...".
+    log('ERROR', `список групп (клавиатура): ${err.message}`);
+    awaiting.set(rawUid, { kind: 'group' });
+    await send(peerId, { text: 'Не получилось показать список группами — напиши название группы текстом, например 209ИС-1:' });
+  }
 }
 
 async function applyGroupChange(rawUid, newGroupRaw) {
@@ -845,15 +873,23 @@ async function onGroupButton(peerId, cmid, rawUid, rest, ack) {
   if (rest.startsWith('page:')) {
     const page = Number(rest.slice(5)) || 0;
     await ack();
-    if (groupCache.has(rawUid)) return void (await render(peerId, cmid, vm.buildGroupPicker(groupCache.get(rawUid), page)));
-    await render(peerId, cmid, { text: '⏳ Обновляю список групп…' });
+    let list = groupCache.get(rawUid);
+    if (!list) {
+      await render(peerId, cmid, { text: '⏳ Обновляю список групп…' });
+      try {
+        list = await ss.listAllGroups();
+        groupCache.set(rawUid, list);
+      } catch (err) {
+        log('WARN', `список групп: ${err.message}`);
+        list = [];
+      }
+    }
     try {
-      const list = await ss.listAllGroups();
-      groupCache.set(rawUid, list);
-      await render(peerId, cmid, vm.buildGroupPicker(list, page));
+      await render(peerId, cmid, list.length ? vm.buildGroupPicker(list, page) : vm.buildGroupPicker([], 0, { error: 'Не удалось загрузить список групп.' }));
     } catch (err) {
-      log('WARN', `список групп: ${err.message}`);
-      await render(peerId, cmid, vm.buildGroupPicker([], 0, { error: 'Не удалось загрузить список групп.' }));
+      log('ERROR', `список групп (клавиатура): ${err.message}`);
+      awaiting.set(rawUid, { kind: 'group' });
+      await send(peerId, { text: 'Не получилось показать список группами — напиши название группы текстом, например 209ИС-1:' });
     }
     return;
   }
@@ -1511,6 +1547,7 @@ async function morningTick() {
     const subj = subjOf(u);
     const greet = u.morningGreeting || '☀️ Доброе утро!';
     let body = greet;
+    let lessons = null;
     if (subj && csvText) {
       const sk = subjKey(subj);
       if (!cache.has(sk)) {
@@ -1522,7 +1559,7 @@ async function morningTick() {
       }
       const data = cache.get(sk);
       if (data && !data.note) {
-        const lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
+        lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
         if (lessons.length) {
           const n = lessons.length;
           const w = n % 10 === 1 && n % 100 !== 11 ? 'пара' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'пары' : 'пар';
@@ -1535,11 +1572,24 @@ async function morningTick() {
     try {
       const peerId = u.myId.slice(3);
       await send(peerId, { text: body });
+
+      let busData = null;
+      if (u.away && u.homePlace) {
+        try {
+          busData = await loadBusData(u.myId, u);
+        } catch (err) {
+          log('WARN', `автобус (утро, ${u.myId}): ${err.message}`);
+        }
+      }
+
       if (cfg.weatherEnabled) {
+        const windows = busData
+          ? commute.weatherHighlightWindows({ toCityRows: busData.toCityRows, toHomeRows: busData.toHomeRows, target: today, lessons })
+          : [];
         if (u.away && u.homePlace && u.homeLat != null && u.homeLon != null) {
           try {
             const homeForecast = await weather.dayForecast(u.homeLat, u.homeLon);
-            const view = vm.buildWeatherPanel({ place: u.homePlace, forecast: homeForecast }, { place: cfg.weatherPlace, forecast: cityForecast || { ranges: [], advice: [] } }, D.iso(today), null);
+            const view = vm.buildWeatherPanel({ place: u.homePlace, forecast: homeForecast }, { place: cfg.weatherPlace, forecast: cityForecast || { ranges: [], advice: [] } }, D.iso(today), null, windows);
             await send(peerId, { text: view.text });
           } catch (err) {
             log('WARN', `погода (дом, ${u.myId}): ${err.message}`);
@@ -1548,6 +1598,16 @@ async function morningTick() {
           await send(peerId, { text: vm.weatherText(cfg.weatherPlace, cityForecast, null) }).catch(() => {});
         }
       }
+
+      if (busData) {
+        try {
+          const view = vm.buildBusView(busData.place, busData.toHomeRows, busData.toCityRows, busData.toHomeUrl, busData.toCityUrl, todayIso);
+          await send(peerId, { text: view.text });
+        } catch (err) {
+          log('WARN', `автобус (утро, ${u.myId}): ${err.message}`);
+        }
+      }
+
       storage.setPlatformMorningLastSent(u.myId, todayIso);
     } catch (err) {
       log('WARN', `утро ${u.myId}: ${err.message || err}`);

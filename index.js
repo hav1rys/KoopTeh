@@ -18,6 +18,7 @@ const ss = require('./scheduleSource');
 const render = require('./render');
 const weather = require('./weather');
 const bus = require('./busSource');
+const commute = require('./commute');
 const menu = require('./menu');
 const bridge = require('./platformBridge');
 
@@ -1179,19 +1180,41 @@ async function onWeekButton(interaction) {
 
 // -------- погода с листанием дат --------
 
+/** Окна для подсветки погоды (выход из дома / возвращение / учёба) — рейсы уже кэшированы loadBusData, расписание — best-effort. */
+async function commuteWindowsFor(uid, s, target) {
+  try {
+    const busData = await loadBusData(uid, s);
+    let lessons = null;
+    if (s.subj) {
+      try {
+        const { csvText } = await ss.fetchDayCsv(target, 4 * 60 * 1000);
+        const data = buildDayData(csvText, s.subj, target, {});
+        if (data && !data.note) lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
+      } catch {
+        /* нет расписания на этот день — окно учёбы просто не подсветится */
+      }
+    }
+    return { busData, windows: commute.weatherHighlightWindows({ toCityRows: busData.toCityRows, toHomeRows: busData.toHomeRows, target, lessons }) };
+  } catch {
+    return { busData: null, windows: [] };
+  }
+}
+
 async function renderWeatherView(interaction, uid, targetIso) {
   const s = effState(uid, interaction.user.id);
   try {
     const cityForecast = await weather.dayForecast(cfg.weatherLat, cfg.weatherLon, targetIso);
+    const t = D.partsFromIso(targetIso) || D.todayParts();
     let homeInfo = null;
+    let highlightWindows = [];
     if (s.away && s.homePlace && s.homeLat != null && s.homeLon != null) {
       const homeForecast = await weather.dayForecast(s.homeLat, s.homeLon, targetIso);
       homeInfo = { place: s.homePlace, forecast: homeForecast };
+      highlightWindows = (await commuteWindowsFor(uid, s, t)).windows;
     }
-    const t = D.partsFromIso(targetIso) || D.todayParts();
     const dateLabel = `${D.fmtDM(t)} (${D.weekdayRu(t)})`;
     const cityInfo = { place: cfg.weatherPlace, forecast: cityForecast };
-    await interaction.editReply(menu.buildWeatherPanel(homeInfo, cityInfo, s.weatherFormat, targetIso, dateLabel));
+    await interaction.editReply(menu.buildWeatherPanel(homeInfo, cityInfo, s.weatherFormat, targetIso, dateLabel, highlightWindows));
   } catch (err) {
     log('WARN', `погода (панель, ${uid}): ${err.message}`);
     await interaction.editReply({ content: 'Не удалось получить погоду, попробуй позже.', embeds: [], components: [] });
@@ -1778,6 +1801,7 @@ async function morningTick() {
     const subj = subjOf(u);
     const greet = u.morningGreeting || '☀️ Доброе утро!';
     let body = greet;
+    let lessons = null;
     if (subj && csvText) {
       const sk = subjKey(subj);
       if (!cache.has(sk)) {
@@ -1789,7 +1813,7 @@ async function morningTick() {
       }
       const data = cache.get(sk);
       if (data && !data.note) {
-        const lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
+        lessons = data.rows.filter((r) => r.kind === 'lesson' && r.start);
         if (lessons.length) {
           const n = lessons.length;
           const w = n % 10 === 1 && n % 100 !== 11 ? 'пара' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'пары' : 'пар';
@@ -1803,24 +1827,46 @@ async function morningTick() {
     try {
       const user = await client.users.fetch(u.myId);
       await user.send({ content: body });
+
+      let busData = null;
+      if (u.away && u.homePlace) {
+        try {
+          busData = await loadBusData(u.myId, u);
+        } catch (err) {
+          log('WARN', `автобус (утро, ${u.myId}): ${err.message}`);
+        }
+      }
+
       if (cfg.weatherEnabled) {
         const wf = storage.getPlatformWeatherFormat(u.myId);
+        const windows = busData
+          ? commute.weatherHighlightWindows({ toCityRows: busData.toCityRows, toHomeRows: busData.toHomeRows, target: today, lessons })
+          : [];
         if (u.away && u.homePlace && u.homeLat != null && u.homeLon != null) {
           try {
             const homeForecast = await weather.dayForecast(u.homeLat, u.homeLon);
-            await user.send(menu.buildWeatherMessage(u.homePlace, homeForecast, wf));
+            await user.send(menu.buildWeatherMessage(u.homePlace, homeForecast, wf, null, windows));
           } catch (err) {
             log('WARN', `погода (дом, ${u.myId}): ${err.message}`);
           }
         }
         if (cityForecast) {
           try {
-            await user.send(menu.buildWeatherMessage(cfg.weatherPlace, cityForecast, wf));
+            await user.send(menu.buildWeatherMessage(cfg.weatherPlace, cityForecast, wf, null, windows));
           } catch (err) {
             log('WARN', `погода (город, ${u.myId}): ${err.message}`);
           }
         }
       }
+
+      if (busData) {
+        try {
+          await user.send(menu.buildBusView(busData.place, busData.toHomeRows, busData.toCityRows, busData.toHomeUrl, busData.toCityUrl, todayIso));
+        } catch (err) {
+          log('WARN', `автобус (утро, ${u.myId}): ${err.message}`);
+        }
+      }
+
       storage.setPlatformMorningLastSent(u.myId, todayIso);
     } catch (err) {
       if (err && err.code === 50007) storage.setPlatformMorningLastSent(u.myId, todayIso);

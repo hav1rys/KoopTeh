@@ -16,6 +16,7 @@ const cfg = require('./config');
 const D = require('./dates');
 const ss = require('./scheduleSource');
 const render = require('./render');
+const commute = require('./commute');
 
 const C = {
   weekday: 0x2b6cb0, // будни
@@ -432,15 +433,22 @@ function awayStopModal(current) {
 
 // ---- Погода: сообщение (эмбед / текст / картинка) и расписание автобуса ----
 
-function buildWeatherMessage(place, forecast, format, dateLabel) {
+function buildWeatherMessage(place, forecast, format, dateLabel, highlightWindows) {
   const title = `🌤 Погода — ${place}${dateLabel ? ` · ${dateLabel}` : ''}`;
   const advice = forecast.advice || [];
-  const body = (forecast.ranges || [])
-    .map((r) => `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`)
+  const ranges = forecast.ranges || [];
+  const body = ranges
+    .map((r) => {
+      const line = `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`;
+      return commute.rangeOverlapsWindows(r, highlightWindows) ? `👉 **${line}**` : line;
+    })
     .join('\n');
 
   if (format === 'image') {
-    const buf = render.available() ? render.renderWeatherImage(`${place}${dateLabel ? ` · ${dateLabel}` : ''}`, forecast) : null;
+    const highlighted = ranges.map((r) => ({ ...r, highlight: commute.rangeOverlapsWindows(r, highlightWindows) }));
+    const buf = render.available()
+      ? render.renderWeatherImage(`${place}${dateLabel ? ` · ${dateLabel}` : ''}`, { ...forecast, ranges: highlighted })
+      : null;
     if (buf) return { content: '', embeds: [], files: [{ attachment: buf, name: 'pogoda.png' }] };
     // нет canvas — откат на эмбед
   }
@@ -462,7 +470,7 @@ function buildWeatherMessage(place, forecast, format, dateLabel) {
  * Панель погоды с листанием дат (◀ Сегодня Завтра ▶) — дом (если задан) + город
  * в одном сообщении, оба в выбранном формате.
  */
-function buildWeatherPanel(homeInfo, cityInfo, format, isoStr, dateLabel) {
+function buildWeatherPanel(homeInfo, cityInfo, format, isoStr, dateLabel, highlightWindows) {
   const todayIso = D.iso(D.todayParts());
   const tomIso = D.iso(D.tomorrowParts());
   const horizonIso = D.iso(D.shiftParts(D.todayParts(), 6));
@@ -474,8 +482,8 @@ function buildWeatherPanel(homeInfo, cityInfo, format, isoStr, dateLabel) {
   );
 
   const parts = [];
-  if (homeInfo) parts.push(buildWeatherMessage(homeInfo.place, homeInfo.forecast, format, dateLabel));
-  parts.push(buildWeatherMessage(cityInfo.place, cityInfo.forecast, format, dateLabel));
+  if (homeInfo) parts.push(buildWeatherMessage(homeInfo.place, homeInfo.forecast, format, dateLabel, highlightWindows));
+  parts.push(buildWeatherMessage(cityInfo.place, cityInfo.forecast, format, dateLabel, highlightWindows));
 
   return {
     content: parts.map((p) => p.content).filter(Boolean).join('\n\n').slice(0, 1990),
@@ -498,17 +506,9 @@ function buildWeatherPanel(homeInfo, cityInfo, format, isoStr, dateLabel) {
  * тоже с задержкой ~10 мин (это промежуточная точка маршрута), а вот
  * прибытие в город после — как в расписании.
  */
-/** Расписание одно и то же каждый день («ежедневно» у перевозчика) — на нужный день просто пересчитываем эпохи. */
-function withEpochs(rows, target) {
-  return (rows || []).map((r) => ({ ...r, epoch: r.depHHMM ? D.epochAt(target, r.depHHMM) : null }));
-}
-
 function busLine(rows, direction, target) {
-  const isToday = D.iso(target) === D.iso(D.todayParts());
-  const dated = withEpochs(rows, target);
-  if (!dated.length) return 'нет данных';
-  const now = Date.now();
-  const next = isToday ? dated.find((r) => r.epoch && r.epoch * 1000 > now) : dated[0];
+  if (!(rows || []).length) return 'нет данных';
+  const next = commute.nextTrip(rows, target);
   if (!next) return 'рейсов на этот день больше нет';
   const head = [next.number, next.title].filter(Boolean).join(' ');
   const rel = next.epoch ? `<t:${next.epoch}:R>` : `в ${next.depHHMM}`;
@@ -532,7 +532,17 @@ function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl, isoSt
     new ButtonBuilder().setCustomId('bus:jump:tomorrow').setLabel('Завтра').setStyle(ButtonStyle.Secondary).setDisabled(isoStr === tomIso),
     new ButtonBuilder().setCustomId(`bus:next:${isoStr}`).setLabel('▶').setStyle(ButtonStyle.Secondary),
   );
-  const list = (rows) => clip((rows || []).map((r) => `${r.depHHMM} → ${r.arrHHMM}`).join('\n') || '—');
+  const nextToHome = commute.nextTrip(toHomeRows, target);
+  const nextToCity = commute.nextTrip(toCityRows, target);
+  const list = (rows, next) =>
+    clip(
+      (rows || [])
+        .map((r) => {
+          const line = `${r.depHHMM} → ${r.arrHHMM}`;
+          return next && r.depHHMM === next.depHHMM && r.arrHHMM === next.arrHHMM ? `👉 **${line}**` : line;
+        })
+        .join('\n') || '—',
+    );
   const withLink = (line, url) => (url ? `${line}\n🔗 Проверить: ${url}` : line);
   const embed = new EmbedBuilder()
     .setColor(C.weekday)
@@ -540,8 +550,8 @@ function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl, isoSt
     .addFields(
       { name: 'Ближайший из города (домой)', value: withLink(busLine(toHomeRows, 'toHome', target), toHomeUrl), inline: false },
       { name: 'Ближайший из дома (в город)', value: withLink(busLine(toCityRows, 'toCity', target), toCityUrl), inline: false },
-      { name: 'Все рейсы из города', value: list(toHomeRows), inline: true },
-      { name: 'Все рейсы из дома', value: list(toCityRows), inline: true },
+      { name: 'Все рейсы из города', value: list(toHomeRows, nextToHome), inline: true },
+      { name: 'Все рейсы из дома', value: list(toCityRows, nextToCity), inline: true },
     )
     .setFooter({ text: 'расписание ежедневное · из города — автовокзал/Яндекс, из дома — Яндекс' });
   return {

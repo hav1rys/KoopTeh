@@ -253,9 +253,16 @@ function renderWeatherImage(place, forecast) {
 
   ctx.font = `400 15px ${F}`;
   for (const r of rows) {
-    ctx.fillStyle = CL.dim;
-    ctx.fillText(r.label, padX, y);
-    ctx.fillStyle = CL.text;
+    if (r.highlight) {
+      ctx.fillStyle = CL.accent;
+      ctx.globalAlpha = 0.12;
+      ctx.fillRect(0, y - 20, W, rowH);
+      ctx.globalAlpha = 1;
+    }
+    ctx.font = r.highlight ? `700 15px ${F}` : `400 15px ${F}`;
+    ctx.fillStyle = r.highlight ? CL.accent : CL.dim;
+    ctx.fillText(`${r.highlight ? '👉 ' : ''}${r.label}`, padX, y);
+    ctx.fillStyle = r.highlight ? CL.accent : CL.text;
     ctx.fillText(`${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`, padX + 260, y);
     y += rowH;
   }

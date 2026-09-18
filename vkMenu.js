@@ -12,6 +12,7 @@ const cfg = require('./config');
 const D = require('./dates');
 const ss = require('./scheduleSource');
 const render = require('./render');
+const commute = require('./commute');
 
 // VK не поддерживает жирный/курсив/код в обычных сообщениях — эти хелперы просто
 // возвращают текст как есть (оставлены, чтобы структура экранов совпадала 1-в-1
@@ -23,10 +24,12 @@ const code = (s) => String(s ?? '');
 const DAYS_RU = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const REMINDER_OPTS = [0, 5, 10, 15, 20, 30, 60];
 // У VK гораздо более жёсткий лимит на инлайн-клавиатуру, чем у Telegram/Discord
-// (сервер VK отдаёт "Code №911 - too much buttons" уже на 6 строках/14 кнопках) —
-// поэтому здесь заметно меньше групп на страницу и меньше строк в списках ниже,
-// чем в telegramMenu.js/menu.js.
-const GROUPS_PER_PAGE = 6;
+// (сервер VK отдаёт "Code №911 - too much buttons" уже на клавиатурах заметно
+// меньше документированных где-либо чисел) — поэтому здесь заметно меньше групп
+// на страницу и меньше строк в списках ниже, чем в telegramMenu.js/menu.js.
+// buildGroupPicker — самая большая клавиатура в боте (группы + пагинация +
+// ручной ввод), поэтому GROUPS_PER_PAGE здесь особенно консервативный.
+const GROUPS_PER_PAGE = 4;
 
 function daysLabel(days) {
   if (!days || !days.length) return '— (не присылать)';
@@ -666,24 +669,29 @@ function buildRoomsView(result, target) {
 
 // ---- Погода -------------------------------------------------------------
 
-function weatherText(place, forecast, dateLabel) {
+function weatherText(place, forecast, dateLabel, highlightWindows) {
   const advice = forecast.advice || [];
-  const body = (forecast.ranges || []).map((r) => `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`).join('\n');
+  const body = (forecast.ranges || [])
+    .map((r) => {
+      const line = `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`;
+      return commute.rangeOverlapsWindows(r, highlightWindows) ? `👉 ${line}` : line;
+    })
+    .join('\n');
   const lines = [`🌤 Погода — ${place}${dateLabel ? ` · ${dateLabel}` : ''}`];
   if (advice.length) lines.push(advice.join('\n'));
   lines.push('', body || 'нет данных');
   return lines.join('\n');
 }
 
-function buildWeatherPanel(homeInfo, cityInfo, isoStr, dateLabel) {
+function buildWeatherPanel(homeInfo, cityInfo, isoStr, dateLabel, highlightWindows) {
   const todayIso = D.iso(D.todayParts());
   const tomIso = D.iso(D.tomorrowParts());
   const horizonIso = D.iso(D.shiftParts(D.todayParts(), 6));
   void todayIso;
   void tomIso;
   const parts = [];
-  if (homeInfo) parts.push(weatherText(homeInfo.place, homeInfo.forecast, dateLabel));
-  parts.push(weatherText(cityInfo.place, cityInfo.forecast, dateLabel));
+  if (homeInfo) parts.push(weatherText(homeInfo.place, homeInfo.forecast, dateLabel, highlightWindows));
+  parts.push(weatherText(cityInfo.place, cityInfo.forecast, dateLabel, highlightWindows));
   const nav = [
     { text: '◀', callback_data: `weather:prev:${isoStr}` },
     { text: 'Сегодня', callback_data: 'weather:jump:today' },
@@ -700,11 +708,8 @@ function buildWeatherPanel(homeInfo, cityInfo, isoStr, dateLabel) {
 // ---- Автобус --------------------------------------------------------------
 
 function busLine(rows, direction, target) {
-  const isToday = D.iso(target) === D.iso(D.todayParts());
-  const dated = (rows || []).map((r) => ({ ...r, epoch: r.depHHMM ? D.epochAt(target, r.depHHMM) : null }));
-  if (!dated.length) return 'нет данных';
-  const now = Date.now();
-  const next = isToday ? dated.find((r) => r.epoch && r.epoch * 1000 > now) : dated[0];
+  if (!(rows || []).length) return 'нет данных';
+  const next = commute.nextTrip(rows, target);
   if (!next) return 'рейсов на этот день больше нет';
   const head = [next.number, next.title].filter(Boolean).join(' ');
   const dep = next.depHHMM ? `отправление ${next.depHHMM}` : '';
@@ -720,7 +725,15 @@ function busLine(rows, direction, target) {
 
 function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl, isoStr) {
   const target = D.partsFromIso(isoStr) || D.todayParts();
-  const list = (rows) => (rows || []).map((r) => `${r.depHHMM} → ${r.arrHHMM}`).join('\n') || '—';
+  const nextToHome = commute.nextTrip(toHomeRows, target);
+  const nextToCity = commute.nextTrip(toCityRows, target);
+  const list = (rows, next) =>
+    (rows || [])
+      .map((r) => {
+        const line = `${r.depHHMM} → ${r.arrHHMM}`;
+        return next && r.depHHMM === next.depHHMM && r.arrHHMM === next.arrHHMM ? `👉 ${line}` : line;
+      })
+      .join('\n') || '—';
   const withLink = (line, url) => (url ? `${line}\n🔗 Проверить: ${url}` : line);
   const text = [
     `🚌 Автобус — ${place} · ${D.fmtDM(target)} (${D.weekdayRu(target)})`,
@@ -731,9 +744,9 @@ function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl, isoSt
     'Ближайший из дома (в город)',
     withLink(busLine(toCityRows, 'toCity', target), toCityUrl),
     '',
-    `Все рейсы из города\n${list(toHomeRows)}`,
+    `Все рейсы из города\n${list(toHomeRows, nextToHome)}`,
     '',
-    `Все рейсы из дома\n${list(toCityRows)}`,
+    `Все рейсы из дома\n${list(toCityRows, nextToCity)}`,
   ].join('\n');
   const kb = [
     [

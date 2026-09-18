@@ -101,6 +101,11 @@ async function fetchHourly(lat, lon, days) {
   }
 }
 
+const hhmmToMin = (hhmm) => {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return h * 60 + m;
+};
+
 /** Схлопывает подряд идущие часы с одинаковой (округлённой) температурой и иконкой в один диапазон. */
 function mergeRanges(hours) {
   const merged = [];
@@ -111,10 +116,15 @@ function mergeRanges(hours) {
     if (last && last.temp === temp && last.icon === icon) last.to = h.hhmm;
     else merged.push({ from: h.hhmm, to: h.hhmm, temp, icon });
   }
+  // fromMin/toMin — минуты от начала суток, диапазон покрывает [fromMin, toMin+60) —
+  // используются, чтобы подсветить погоду на время выхода из дома / возвращения / учёбы
+  // (см. commute.js), сам текст (label) их не использует.
   return merged.map((r) => ({
     label: r.from === r.to ? r.from : `${r.from}–${r.to}`,
     icon: r.icon,
     temp: r.temp,
+    fromMin: hhmmToMin(r.from),
+    toMin: hhmmToMin(r.to),
   }));
 }
 

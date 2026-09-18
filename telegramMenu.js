@@ -10,6 +10,7 @@ const cfg = require('./config');
 const D = require('./dates');
 const ss = require('./scheduleSource');
 const render = require('./render');
+const commute = require('./commute');
 
 // ---- HTML-экранирование (Telegram parse_mode:'HTML' падает/ломается на «сырых» <>&) ----
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -653,22 +654,27 @@ function buildRoomsView(result, target) {
 
 // ---- Погода -------------------------------------------------------------
 
-function weatherText(place, forecast, dateLabel) {
+function weatherText(place, forecast, dateLabel, highlightWindows) {
   const advice = forecast.advice || [];
-  const body = (forecast.ranges || []).map((r) => `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`).join('\n');
+  const body = (forecast.ranges || [])
+    .map((r) => {
+      const line = `${r.label} — ${r.icon} ${r.temp > 0 ? '+' : ''}${r.temp}°`;
+      return commute.rangeOverlapsWindows(r, highlightWindows) ? `👉 <b>${line}</b>` : line;
+    })
+    .join('\n');
   const lines = [b(`🌤 Погода — ${esc(place)}${dateLabel ? ` · ${dateLabel}` : ''}`)];
   if (advice.length) lines.push(esc(advice.join('\n')));
   lines.push('', body || 'нет данных');
   return lines.join('\n');
 }
 
-function buildWeatherPanel(homeInfo, cityInfo, isoStr, dateLabel) {
+function buildWeatherPanel(homeInfo, cityInfo, isoStr, dateLabel, highlightWindows) {
   const todayIso = D.iso(D.todayParts());
   const tomIso = D.iso(D.tomorrowParts());
   const horizonIso = D.iso(D.shiftParts(D.todayParts(), 6));
   const parts = [];
-  if (homeInfo) parts.push(weatherText(homeInfo.place, homeInfo.forecast, dateLabel));
-  parts.push(weatherText(cityInfo.place, cityInfo.forecast, dateLabel));
+  if (homeInfo) parts.push(weatherText(homeInfo.place, homeInfo.forecast, dateLabel, highlightWindows));
+  parts.push(weatherText(cityInfo.place, cityInfo.forecast, dateLabel, highlightWindows));
   const nav = [
     { text: isoStr === todayIso ? '◀' : '◀', callback_data: `weather:prev:${isoStr}` },
     { text: 'Сегодня', callback_data: 'weather:jump:today' },
@@ -685,11 +691,8 @@ function buildWeatherPanel(homeInfo, cityInfo, isoStr, dateLabel) {
 // ---- Автобус --------------------------------------------------------------
 
 function busLine(rows, direction, target) {
-  const isToday = D.iso(target) === D.iso(D.todayParts());
-  const dated = (rows || []).map((r) => ({ ...r, epoch: r.depHHMM ? D.epochAt(target, r.depHHMM) : null }));
-  if (!dated.length) return 'нет данных';
-  const now = Date.now();
-  const next = isToday ? dated.find((r) => r.epoch && r.epoch * 1000 > now) : dated[0];
+  if (!(rows || []).length) return 'нет данных';
+  const next = commute.nextTrip(rows, target);
   if (!next) return 'рейсов на этот день больше нет';
   const head = esc([next.number, next.title].filter(Boolean).join(' '));
   const dep = next.depHHMM ? `отправление ${next.depHHMM}` : '';
@@ -705,7 +708,15 @@ function busLine(rows, direction, target) {
 
 function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl, isoStr) {
   const target = D.partsFromIso(isoStr) || D.todayParts();
-  const list = (rows) => (rows || []).map((r) => `${r.depHHMM} → ${r.arrHHMM}`).join('\n') || '—';
+  const nextToHome = commute.nextTrip(toHomeRows, target);
+  const nextToCity = commute.nextTrip(toCityRows, target);
+  const list = (rows, next) =>
+    (rows || [])
+      .map((r) => {
+        const line = esc(`${r.depHHMM} → ${r.arrHHMM}`);
+        return next && r.depHHMM === next.depHHMM && r.arrHHMM === next.arrHHMM ? `👉 <b>${line}</b>` : line;
+      })
+      .join('\n') || '—';
   const withLink = (line, url) => (url ? `${line}\n🔗 <a href="${esc(url)}">Проверить</a>` : line);
   const text = [
     b(`🚌 Автобус — ${esc(place)} · ${D.fmtDM(target)} (${D.weekdayRu(target)})`),
@@ -716,9 +727,9 @@ function buildBusView(place, toHomeRows, toCityRows, toHomeUrl, toCityUrl, isoSt
     b('Ближайший из дома (в город)'),
     withLink(busLine(toCityRows, 'toCity', target), toCityUrl),
     '',
-    `${b('Все рейсы из города')}\n${esc(list(toHomeRows))}`,
+    `${b('Все рейсы из города')}\n${list(toHomeRows, nextToHome)}`,
     '',
-    `${b('Все рейсы из дома')}\n${esc(list(toCityRows))}`,
+    `${b('Все рейсы из дома')}\n${list(toCityRows, nextToCity)}`,
   ].join('\n');
   const todayIso = D.iso(D.todayParts());
   const tomIso = D.iso(D.tomorrowParts());
