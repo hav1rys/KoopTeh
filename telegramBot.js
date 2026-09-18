@@ -270,19 +270,24 @@ bot.onText(/^\/start\b/, async (msg) => {
 // \b после кириллического слова в JS не срабатывает (\w — только ASCII),
 // поэтому /помощь, /звонки, /сейчас, /расписание, /поиск, /преподаватель
 // используют (?=\s|$) вместо \b — иначе команда никогда не матчится.
+// У части команд рядом есть латинская альтернатива (zvonki, seychas,
+// raspisanie, poisk, prepodavatel) — Telegram Bot API не разрешает
+// регистрировать кириллические команды в setMyCommands (только a-z0-9_),
+// поэтому для меню «/» показываются они, а кириллические остаются рабочими
+// для тех, кто их уже знает или вводит вручную.
 bot.onText(/^\/помощь(?=\s|$)|^\/help\b/, async (msg) => {
   if (!onlyPrivate(msg)) return;
   const view = tm.buildHelpView();
   await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard } });
 });
 
-bot.onText(/^\/звонки(?=\s|$)/, async (msg) => {
+bot.onText(/^\/звонки(?=\s|$)|^\/zvonki\b/, async (msg) => {
   if (!onlyPrivate(msg)) return;
   const view = tm.bellView();
   await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard } });
 });
 
-bot.onText(/^\/сейчас(?=\s|$)/, async (msg) => {
+bot.onText(/^\/сейчас(?=\s|$)|^\/seychas\b/, async (msg) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const s = effState(rawUid);
@@ -299,7 +304,7 @@ bot.onText(/^\/сейчас(?=\s|$)/, async (msg) => {
   await logSchedule(rawUid, '/сейчас', data);
 });
 
-bot.onText(/^\/расписание(?=\s|$)\s*(.*)$/, async (msg, match) => {
+bot.onText(/^\/(?:расписание|raspisanie)(?=\s|$)\s*(.*)$/, async (msg, match) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const s = effState(rawUid, rawId(msg.chat.id));
@@ -315,7 +320,7 @@ bot.onText(/^\/расписание(?=\s|$)\s*(.*)$/, async (msg, match) => {
   await logSchedule(rawUid, `/расписание на ${D.fmtDM(target)}`, d);
 });
 
-bot.onText(/^\/поиск(?=\s|$)\s*(.*)$/, async (msg, match) => {
+bot.onText(/^\/(?:поиск|poisk)(?=\s|$)\s*(.*)$/, async (msg, match) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const q = (match[1] || '').trim();
@@ -325,7 +330,7 @@ bot.onText(/^\/поиск(?=\s|$)\s*(.*)$/, async (msg, match) => {
   await showLookup(msg.chat.id, rawUid, 'search', isNum ? { room: q } : { teacher: q }, target, { fresh: true });
 });
 
-bot.onText(/^\/преподаватель(?=\s|$)\s*(.*)$/, async (msg, match) => {
+bot.onText(/^\/(?:преподаватель|prepodavatel)(?=\s|$)\s*(.*)$/, async (msg, match) => {
   if (!onlyPrivate(msg)) return;
   const rawUid = uid(msg.chat.id);
   const surname = (match[1] || '').trim();
@@ -1879,9 +1884,27 @@ function bootstrapAdmin() {
   if (storage.addAdmin(`tg:${cfg.telegramAdminId}`)) log('INFO', `админ по умолчанию: tg:${cfg.telegramAdminId}`);
 }
 
-bot.getMe().then((me) => {
+// Меню «/» в клиенте Telegram (автодополнение) — команда должна быть a-z0-9_,
+// поэтому здесь латинские алиасы (см. комментарий у onText выше); кириллические
+// варианты команд (/расписание и т.п.) продолжают работать, просто не в меню.
+const BOT_COMMANDS = [
+  { command: 'start', description: 'Меню и все настройки' },
+  { command: 'raspisanie', description: 'Расписание на сегодня (или «дд.мм»)' },
+  { command: 'seychas', description: 'Текущая и следующая пара' },
+  { command: 'poisk', description: 'Кабинет / преподаватель / предмет / группа' },
+  { command: 'prepodavatel', description: 'Кто что ведёт по фамилии' },
+  { command: 'zvonki', description: 'Расписание звонков' },
+  { command: 'help', description: 'Справка по командам и кнопкам' },
+];
+
+bot.getMe().then(async (me) => {
   log('INFO', `Telegram-бот запущен: @${me.username}`);
   bootstrapAdmin();
+  try {
+    await bot.setMyCommands(BOT_COMMANDS);
+  } catch (err) {
+    log('WARN', `setMyCommands: ${err.message}`);
+  }
   startSchedulers();
   logToChannel(`🚀 Telegram-бот запущен — @${me.username}`);
 });
