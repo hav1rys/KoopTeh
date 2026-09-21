@@ -196,7 +196,19 @@ async function safeSchedule(subj, target, showGaps) {
 // -------------------------------------------------------------------- бот
 
 const bot = new TelegramBot(cfg.telegramToken, { polling: true });
-bot.on('polling_error', (err) => log('WARN', `polling: ${err.message}`));
+// При сбое на стороне Telegram (502 и т.п.) библиотека ретраит ~3 раза в секунду —
+// пишем в лог не чаще раза в 30 с, с числом подавленных повторов.
+let pollLogAt = 0;
+let pollSuppressed = 0;
+bot.on('polling_error', (err) => {
+  if (Date.now() - pollLogAt < 30 * 1000) {
+    pollSuppressed += 1;
+    return;
+  }
+  log('WARN', `polling: ${err.message}${pollSuppressed ? ` (ещё ${pollSuppressed} таких же за последние 30 с)` : ''}`);
+  pollLogAt = Date.now();
+  pollSuppressed = 0;
+});
 
 // Позволяет Discord-боту доставить сюда ответ на вопрос, заданный через Telegram
 // (когда админ отвечает из Discord-канала «Вопросы»). См. platformBridge.js.
