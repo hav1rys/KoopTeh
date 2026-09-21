@@ -1707,7 +1707,7 @@ async function runBroadcast(due, target, targetIso) {
         if (!digestSaved.has(sk)) {
           try {
             const canon = buildDayData(csvText, subj, target, {});
-            storage.setDigest(`${sk}|${targetIso}`, ss.scheduleHash(canon), targetIso, ss.rowsSnapshot(canon));
+            storage.setDigest(`vk|${sk}|${targetIso}`, ss.scheduleHash(canon), targetIso, ss.rowsSnapshot(canon));
           } catch {
             /* ignore */
           }
@@ -1782,7 +1782,10 @@ async function reminderTick() {
 async function changeTick() {
   const todayIso = D.iso(D.todayParts());
   storage.purgeDigests(todayIso);
-  const entries = storage.digestEntries().filter((e) => e.iso >= todayIso);
+  const entries = storage
+    .digestEntries()
+    .filter((e) => e.iso >= todayIso && e.group.startsWith('vk|'))
+    .map((e) => ({ ...e, group: e.group.slice('vk|'.length) }));
   if (!entries.length) return;
   const subs = storage
     .subscribers()

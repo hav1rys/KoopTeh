@@ -53,6 +53,25 @@ function load() {
   if (!isObj(data.linkCodes)) data.linkCodes = {};
   if (!isObj(data.platformPrefs)) data.platformPrefs = {};
   if (!data.admins.length && cfg.adminId) data.admins = [String(cfg.adminId)];
+  migrateDigests();
+}
+
+// Отпечатки расписания раньше были общими на все площадки ("<subj>|<iso>"): первый же
+// changeTick любого бота обновлял хэш, и остальные боты уже не видели изменения и
+// не уведомляли своих пользователей. Теперь ключ — "<ds|tg|vk>|<subj>|<iso>".
+const DIGEST_NAMESPACES = ['ds', 'tg', 'vk'];
+function migrateDigests() {
+  let changed = false;
+  for (const [key, v] of Object.entries(data.digests)) {
+    if (DIGEST_NAMESPACES.some((ns) => key.startsWith(`${ns}|`))) continue;
+    for (const ns of DIGEST_NAMESPACES) {
+      const nk = `${ns}|${key}`;
+      if (!data.digests[nk]) data.digests[nk] = { ...v };
+    }
+    delete data.digests[key];
+    changed = true;
+  }
+  if (changed) save();
 }
 
 function save() {
