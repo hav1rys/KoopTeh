@@ -20,6 +20,7 @@ const ss = require('./scheduleSource');
 const weather = require('./weather');
 const bus = require('./busSource');
 const commute = require('./commute');
+const newDays = require('./newDays');
 const tm = require('./telegramMenu');
 const discordLog = require('./discordLog');
 const bridge = require('./platformBridge');
@@ -114,6 +115,7 @@ function effState(rawUid, platformRawId = rawUid) {
     format: storage.getPlatformFormat(platformRawId),
     reminderMinutes: s.reminderMinutes,
     morning: s.morning,
+    notifyNew: s.notifyNew,
     morningTime: s.morningTime,
     morningGreeting: s.morningGreeting,
     pausedUntil: s.pausedUntil,
@@ -291,6 +293,12 @@ bot.onText(/^\/помощь(?=\s|$)|^\/help\b/, async (msg) => {
   if (!onlyPrivate(msg)) return;
   const view = tm.buildHelpView();
   await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard } });
+});
+
+bot.onText(/^\/(?:боты|bots)(?=\s|$)/, async (msg) => {
+  if (!onlyPrivate(msg)) return;
+  const view = tm.buildOtherBotsView();
+  await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: view.keyboard }, disable_web_page_preview: true });
 });
 
 bot.onText(/^\/звонки(?=\s|$)|^\/zvonki\b/, async (msg) => {
@@ -650,6 +658,10 @@ async function onMenuButton(chatId, messageId, rawUid, action, ack) {
       await ack();
       await render(chatId, messageId, tm.buildHelpView());
       return;
+    case 'bots':
+      await ack();
+      await render(chatId, messageId, tm.buildOtherBotsView());
+      return;
     case 'refresh':
       await ack();
       await render(chatId, messageId, menuView(rawUid));
@@ -688,6 +700,10 @@ async function onSettingsButton(chatId, messageId, rawUid, rest, ack) {
       return void (await back());
     case 'togglegaps':
       storage.setShowGaps(rawUid, !s.showGaps);
+      await ack();
+      return void (await back());
+    case 'newday':
+      storage.setNotifyNew(rawUid, !s.notifyNew);
       await ack();
       return void (await back());
     case 'format':
@@ -1466,6 +1482,7 @@ function startSchedulers() {
   setInterval(reminderTick, 60 * 1000);
   setInterval(announceTick, 60 * 1000);
   setInterval(changeTick, 15 * 60 * 1000);
+  setInterval(newDayTick, 10 * 60 * 1000);
   setInterval(warmTick, 5 * 60 * 1000);
   setInterval(healthTick, 15 * 60 * 1000);
   setInterval(pauseReminderTick, 60 * 60 * 1000);
@@ -1814,6 +1831,62 @@ async function changeTick() {
   }
 }
 
+// -------- «опубликовано расписание на новый день» (проверка раз в 10 минут) --------
+
+async function newDayTick() {
+  let fresh;
+  try {
+    fresh = await newDays.detectNewDays('tg');
+  } catch (err) {
+    log('DEBUG', `новый день: календарь недоступен: ${err.message}`);
+    return;
+  }
+  if (!fresh.length) return;
+
+  const users = storage
+    .newDayRecipients()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId && !isPaused(u.pausedUntil));
+
+  for (const iso of fresh) {
+    const target = D.partsFromIso(iso);
+    if (!target) continue;
+    let csvText;
+    let humanUrl = null;
+    try {
+      const r = await ss.fetchDayCsv(target, 0);
+      csvText = r.csvText;
+      humanUrl = r.humanUrl;
+    } catch {
+      continue; // таблица ещё не читается — повторим на следующем тике
+    }
+    let sent = 0;
+    for (const u of users) {
+      if (storage.getPlatformLastSent(u.myId) === iso) continue; // этот день уже пришёл рассылкой
+      const subj = subjOf(u);
+      if (!subj) continue;
+      let data;
+      try {
+        data = buildDayData(csvText, subj, target, { showGaps: u.showGaps });
+      } catch {
+        continue;
+      }
+      if (!data || data.note) continue; // у группы в этот день пар нет — не шумим
+      try {
+        const body = tm.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, storage.getPlatformFormat(u.myId));
+        await bot.sendMessage(u.myId.slice(3), `🆕 Опубликовано расписание на ${D.fmtDM(target)} (${D.weekdayRu(target)}):`);
+        await send(u.myId.slice(3), body);
+        sent += 1;
+      } catch (err) {
+        if (!/bot was blocked|chat not found/i.test(err.message || '')) log('WARN', `новый день ${u.myId}: ${err.message || err}`);
+      }
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    newDays.markSeen('tg', iso);
+    log('INFO', `новый день ${iso}: уведомлений отправлено ${sent}`);
+  }
+}
+
 async function pauseReminderTick() {
   const tomIso = D.iso(D.tomorrowParts());
   for (const u of storage.subscribers()) {
@@ -1909,6 +1982,7 @@ const BOT_COMMANDS = [
   { command: 'poisk', description: 'Кабинет / преподаватель / предмет / группа' },
   { command: 'prepodavatel', description: 'Кто что ведёт по фамилии' },
   { command: 'zvonki', description: 'Расписание звонков' },
+  { command: 'bots', description: 'Другие боты (VK, Discord)' },
   { command: 'help', description: 'Справка по командам и кнопкам' },
 ];
 

@@ -19,6 +19,7 @@ const render = require('./render');
 const weather = require('./weather');
 const bus = require('./busSource');
 const commute = require('./commute');
+const newDays = require('./newDays');
 const menu = require('./menu');
 const bridge = require('./platformBridge');
 
@@ -113,6 +114,7 @@ function effState(uid, platformRawId = uid) {
     format: storage.getPlatformFormat(platformRawId),
     reminderMinutes: s.reminderMinutes,
     morning: s.morning,
+    notifyNew: s.notifyNew,
     morningTime: s.morningTime,
     morningGreeting: s.morningGreeting,
     pausedUntil: s.pausedUntil,
@@ -1067,6 +1069,9 @@ async function onSettingsButton(interaction) {
     case 'togglegaps':
       storage.setShowGaps(uid, !s.showGaps);
       return void (await back());
+    case 'newday':
+      storage.setNotifyNew(uid, !s.notifyNew);
+      return void (await back());
     case 'format':
       storage.setPlatformFormat(interaction.user.id, menu.nextFormat(s.format));
       return void (await back());
@@ -1698,6 +1703,7 @@ function startSchedulers() {
   setInterval(reminderTick, 60 * 1000);
   setInterval(announceTick, 60 * 1000);
   setInterval(changeTick, 15 * 60 * 1000);
+  setInterval(newDayTick, 10 * 60 * 1000);
   setInterval(warmTick, 5 * 60 * 1000);
   setInterval(healthTick, 15 * 60 * 1000);
   setInterval(pauseReminderTick, 60 * 60 * 1000);
@@ -2151,6 +2157,63 @@ async function changeTick() {
       }
       await new Promise((r) => setTimeout(r, 800));
     }
+  }
+}
+
+// -------- «опубликовано расписание на новый день» (проверка раз в 10 минут) --------
+
+async function newDayTick() {
+  let fresh;
+  try {
+    fresh = await newDays.detectNewDays('ds');
+  } catch (err) {
+    log('DEBUG', `новый день: календарь недоступен: ${err.message}`);
+    return;
+  }
+  if (!fresh.length) return;
+
+  const users = storage
+    .newDayRecipients()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId && !isPaused(u.pausedUntil));
+
+  for (const iso of fresh) {
+    const target = D.partsFromIso(iso);
+    if (!target) continue;
+    let csvText;
+    let humanUrl = null;
+    try {
+      const r = await ss.fetchDayCsv(target, 0);
+      csvText = r.csvText;
+      humanUrl = r.humanUrl;
+    } catch {
+      continue; // таблица ещё не читается — повторим на следующем тике
+    }
+    let sent = 0;
+    for (const u of users) {
+      if (storage.getPlatformLastSent(u.myId) === iso) continue; // этот день уже пришёл рассылкой
+      const subj = subjOf(u);
+      if (!subj) continue;
+      let data;
+      try {
+        data = buildDayData(csvText, subj, target, { showGaps: u.showGaps });
+      } catch {
+        continue;
+      }
+      if (!data || data.note) continue; // у группы в этот день пар нет — не шумим
+      try {
+        const body = menu.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, storage.getPlatformFormat(u.myId), u.theme);
+        const user = await client.users.fetch(u.myId);
+        await user.send({ content: `🆕 Опубликовано расписание на ${D.fmtDM(target)} (${D.weekdayRu(target)}):` });
+        await user.send(body);
+        sent += 1;
+      } catch (err) {
+        if (!(err && err.code === 50007)) log('WARN', `новый день ${u.myId}: ${err.message || err}`);
+      }
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    newDays.markSeen('ds', iso);
+    log('INFO', `новый день ${iso}: уведомлений отправлено ${sent}`);
   }
 }
 

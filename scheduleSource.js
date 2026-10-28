@@ -86,13 +86,40 @@ function daysInRange(text) {
     .filter((v) => v >= 1 && v <= 31);
 }
 
+const MONTHS_RU = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const GAP = '(?:\\s|&nbsp;|<[^>]+>)*';
+const MONTH_HEADING_RE = new RegExp(`(${MONTHS_RU.join('|')})${GAP},?${GAP}(20\\d\\d)`, 'gi');
+
+/** Заголовки месяцев на странице («Октябрь, 2026») с позициями в HTML. */
+function monthHeadings(html) {
+  return [...html.matchAll(MONTH_HEADING_RE)].map((m) => ({
+    index: m.index,
+    y: Number(m[2]),
+    mo: MONTHS_RU.indexOf(m[1].toLowerCase()) + 1,
+  }));
+}
+
+// Подпись ссылки-дня короткая («04», «расписание»). Длинный текст — это не день календаря
+// (например «График пересдачи задолженности …»), его нельзя привязывать к числу.
+const MAX_DAY_ANCHOR_LEN = 30;
+
 /**
  * Возвращает Map: ключ -> csvUrl.
- * Ключи: "dd.mm.yyyy" и "dd.mm" (если в тексте ссылки есть полная дата),
- * иначе число дня месяца (обычный случай: <a ...>04</a>).
+ * Ключи: "dd.mm.yyyy" (месяц берётся из ближайшего выше заголовка «Месяц, год»);
+ * для ссылки с полной датой в тексте ещё и "dd.mm"; если на странице нет заголовков
+ * месяцев — число дня месяца (старый формат: <a ...>04</a>).
  */
 function extractSheetLinks(html) {
   const out = new Map();
+  const heads = monthHeadings(html);
+  const headingAt = (idx) => {
+    let cur = null;
+    for (const h of heads) {
+      if (h.index < idx) cur = h;
+      else break;
+    }
+    return cur;
+  };
   const anchorRe = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
   let m;
   while ((m = anchorRe.exec(html))) {
@@ -113,6 +140,7 @@ function extractSheetLinks(html) {
       out.set(`${full[1]}.${full[2]}`, csvUrl);
       continue;
     }
+    if (anchorText.length > MAX_DAY_ANCHOR_LEN) continue;
 
     let day = daysInRange(anchorText)[0] ?? null;
     if (day == null) {
@@ -120,13 +148,27 @@ function extractSheetLinks(html) {
       const nums = daysInRange(before);
       if (nums.length) day = nums[nums.length - 1];
     }
-    if (day != null && !out.has(day)) out.set(day, csvUrl);
+    if (day == null) continue;
+
+    const head = headingAt(m.index);
+    if (head) {
+      if (day > new Date(head.y, head.mo, 0).getDate()) continue;
+      const key = `${pad(day)}.${pad(head.mo)}.${head.y}`;
+      if (!out.has(key)) out.set(key, csvUrl);
+    } else if (!out.has(day)) {
+      out.set(day, csvUrl);
+    }
   }
   return out;
 }
 
 function findSheetUrl(links, t) {
-  return links.get(fmtDMY(t)) || links.get(fmtDM(t)) || links.get(t.d) || null;
+  const exact = links.get(fmtDMY(t)) || links.get(fmtDM(t));
+  if (exact) return exact;
+  // Число дня без месяца годится только для страниц, где месяцы вообще не подписаны:
+  // иначе 05.11 получил бы таблицу от 05.10.
+  const hasDated = [...links.keys()].some((k) => typeof k === 'string');
+  return hasDated ? null : links.get(t.d) || null;
 }
 
 // Календарь-страница меняется редко — короткий кэш HTML (снимает нагрузку при
@@ -144,6 +186,16 @@ async function resolveSheetUrl(calendarUrl, target) {
   const url = findSheetUrl(extractSheetLinks(html), target);
   if (!url) throw new NotPublishedError(`нет ссылки на расписание для ${fmtDMY(target)}`);
   return url;
+}
+
+/** ISO-даты всех дней, на которые на странице календаря есть ссылка на таблицу (по возрастанию). */
+async function listPublishedDays(calendarUrl = cfg.calendarUrl) {
+  const html = await calendarHtml(calendarUrl);
+  return [...extractSheetLinks(html).keys()]
+    .map((k) => (typeof k === 'string' ? /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(k) : null))
+    .filter(Boolean)
+    .map((m) => `${m[3]}-${m[2]}-${m[1]}`)
+    .sort();
 }
 
 /** Ссылка на CSV самого позднего опубликованного дня (последняя ссылка на странице). */
@@ -838,6 +890,47 @@ const _health = {
 };
 const health = () => ({ ..._health });
 
+/** Даты (ISO) из заголовков блоков внутри таблицы («03.11.2026 вторник»). */
+function sheetBlockDates(csvText) {
+  return parseBlocks(parseCsv(stripBom(String(csvText))))
+    .map((b) => /(\d{2})\.(\d{2})\.(\d{4})/.exec(b.header[0] || ''))
+    .filter(Boolean)
+    .map((m) => `${m[3]}-${m[2]}-${m[1]}`);
+}
+
+/** Название Google-таблицы («03.11 - Google Spreadsheets» -> «03.11»); null, если не удалось. */
+async function sheetTitle(url) {
+  const human = humanSheetUrl(url);
+  if (!human) return null;
+  try {
+    const html = (await httpGet(human)).body;
+    const m = /<title>([^<]*)<\/title>/i.exec(html);
+    return m ? decodeEntities(m[1]).replace(/\s*-\s*Google.*$/i, '').trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Защита от чужого дня: таблица должна быть именно на запрошенную дату. Сначала смотрим
+ * даты внутри таблицы (бесплатно, из уже скачанного CSV), если их нет — на название
+ * таблицы («03.11»). Если дата нигде не нашлась — не мешаем (формат мог поменяться).
+ */
+async function assertSheetIsForDate(url, csvText, target) {
+  const inTable = sheetBlockDates(csvText);
+  if (inTable.length) {
+    if (!inTable.includes(D.iso(target))) {
+      throw new NotPublishedError(`в таблице расписание на ${D.fmtDMY(D.partsFromIso(inTable[0]))}, а запрошено на ${fmtDMY(target)}`);
+    }
+    return;
+  }
+  const title = await sheetTitle(url);
+  const dates = title ? [...title.matchAll(/(\d{1,2})\.(\d{2})(?:\.(\d{4}))?/g)] : [];
+  if (dates.length && !dates.some((x) => +x[1] === target.d && +x[2] === target.mo)) {
+    throw new NotPublishedError(`таблица «${title}» не на ${fmtDM(target)}`);
+  }
+}
+
 async function fetchDayCsv(target, maxAgeMs = 0) {
   const key = D.iso(target);
   const hit = _csvCache.get(key);
@@ -846,6 +939,7 @@ async function fetchDayCsv(target, maxAgeMs = 0) {
   try {
     const url = await resolveSheetUrl(cfg.calendarUrl, target);
     const csvText = await downloadCsv(url);
+    await assertSheetIsForDate(url, csvText, target);
     const rec = { at: Date.now(), csvText, humanUrl: humanSheetUrl(url) };
     _csvCache.set(key, rec);
     if (_csvCache.size > 40) {
@@ -954,6 +1048,9 @@ module.exports = {
   formatLesson,
   extractSheetLinks,
   findSheetUrl,
+  sheetBlockDates,
+  listPublishedDays,
+  assertSheetIsForDate,
 };
 
 // --- Ручная проверка: node scheduleSource.js <группа> [дд.мм.гггг] ---

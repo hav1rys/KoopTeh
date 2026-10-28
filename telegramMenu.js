@@ -109,8 +109,9 @@ function buildMenu(s, extras = {}) {
     { text: '🔄 Обновить', callback_data: 'menu:refresh' },
   ];
   if (extras.showBus) row4.unshift({ text: '🚌 Автобус', callback_data: 'menu:bus' });
+  const row5 = [{ text: '🤖 Другие боты', callback_data: 'menu:bots' }];
 
-  return { text: lines.join('\n'), keyboard: [row1, row2, row3, row4] };
+  return { text: lines.join('\n'), keyboard: [row1, row2, row3, row4, row5] };
 }
 
 /** Постоянная клавиатура снизу экрана (под полем ввода) — та же основная навигация,
@@ -127,6 +128,17 @@ function mainReplyKeyboard() {
     row3,
     ['🚌 Автобус', '❓ Задать вопрос', 'ℹ️ Помощь'],
   ];
+}
+
+// ---- Другие боты ------------------------------------------------------
+
+function buildOtherBotsView() {
+  const text = [
+    b('🤖 Другие боты:'),
+    `- VK: ${esc(cfg.botLinks.vk)}`,
+    `- Discord: ${esc(cfg.botLinks.discord)}`,
+  ].join('\n');
+  return { text, keyboard: [[{ text: '← В меню', callback_data: 'menu:refresh' }]] };
 }
 
 // ---- Помощь -----------------------------------------------------------
@@ -174,6 +186,7 @@ function buildSettingsView(s) {
     `📆 Дни: ${daysLabel(s.days)}`,
     `⏰ Напоминания: ${s.reminderMinutes ? `за ${s.reminderMinutes} мин` : 'выкл'}`,
     `☀️ Утро: ${s.morning ? s.morningTime : 'выкл'}`,
+    `🆕 Новое расписание: ${s.notifyNew ? 'уведомлять' : 'выкл'}`,
     `🖼 Формат: ${fmtLabel(s.format)}`,
     `🚪 Окна «пар нет»: ${s.showGaps ? 'показывать' : 'скрывать'}`,
     `🏘 Не из города: ${s.away && s.homePlace ? esc(s.homePlace) : '—'}`,
@@ -199,6 +212,7 @@ function buildSettingsView(s) {
       { text: `Формат: ${fmtLabel(s.format)}`, callback_data: 'set:format' },
       { text: `Погода: ${fmtLabel(s.weatherFormat)}`, callback_data: 'set:wthrformat' },
     ],
+    [{ text: s.notifyNew ? '🆕 Новое расписание: вкл' : '🆕 Новое расписание: выкл', callback_data: 'set:newday' }],
     [{ text: '🔗 Связать с Discord/VK', callback_data: 'set:link' }],
     [{ text: '← В меню', callback_data: 'set:back' }],
   ];
@@ -858,6 +872,7 @@ module.exports = {
   weatherText,
   buildWeatherPanel,
   buildBusView,
+  buildOtherBotsView,
   buildAdminMenu,
   buildAdminLogView,
   buildSchedAnnView,

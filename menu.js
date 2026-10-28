@@ -255,6 +255,7 @@ function buildSettingsView(s) {
       { name: 'Дни', value: `📆 ${daysLabel(s.days)}`, inline: true },
       { name: 'Напоминания', value: s.reminderMinutes ? `⏰ за ${s.reminderMinutes} мин` : '⏰ выкл', inline: true },
       { name: 'Утро', value: s.morning ? `☀️ ${s.morningTime}` : '☀️ выкл', inline: true },
+      { name: 'Новое расписание', value: s.notifyNew ? '🆕 уведомлять' : '🆕 выкл', inline: true },
       { name: 'Формат', value: fmtField(s.format), inline: true },
       { name: 'Цвет', value: `🎨 ${THEME_LABEL[s.theme] || s.theme || 'по умолчанию'}`, inline: true },
       { name: 'Окна «пар нет»', value: s.showGaps ? 'показывать' : 'скрывать', inline: true },
@@ -302,6 +303,11 @@ function buildSettingsView(s) {
     new ButtonBuilder().setCustomId('set:wthrformat').setLabel(`Погода: ${fmtLabel(s.weatherFormat)}`).setStyle(ButtonStyle.Secondary),
   );
   const row4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('set:newday')
+      .setLabel(s.notifyNew ? '🆕 Новое расписание (вкл)' : '🆕 Новое расписание')
+      .setStyle(s.notifyNew ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(noSubj),
     new ButtonBuilder().setCustomId('set:link').setLabel('🔗 Связать с Telegram/VK').setStyle(ButtonStyle.Secondary),
   );
   const row5 = new ActionRowBuilder().addComponents(

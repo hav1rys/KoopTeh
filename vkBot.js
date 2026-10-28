@@ -29,6 +29,7 @@ const ss = require('./scheduleSource');
 const weather = require('./weather');
 const bus = require('./busSource');
 const commute = require('./commute');
+const newDays = require('./newDays');
 const vm = require('./vkMenu');
 const discordLog = require('./discordLog');
 const bridge = require('./platformBridge');
@@ -107,6 +108,7 @@ function effState(rawUid, platformRawId = rawUid) {
     format: storage.getPlatformFormat(platformRawId),
     reminderMinutes: s.reminderMinutes,
     morning: s.morning,
+    notifyNew: s.notifyNew,
     morningTime: s.morningTime,
     morningGreeting: s.morningGreeting,
     pausedUntil: s.pausedUntil,
@@ -598,6 +600,10 @@ async function onMenuButton(peerId, cmid, rawUid, action, ack) {
       await ack();
       await render(peerId, cmid, vm.buildHelpView());
       return;
+    case 'bots':
+      await ack();
+      await render(peerId, cmid, vm.buildOtherBotsView());
+      return;
     case 'refresh':
       await ack();
       await render(peerId, cmid, menuView(rawUid));
@@ -643,6 +649,10 @@ async function onSettingsButton(peerId, cmid, rawUid, rest, ack) {
       return void (await back());
     case 'togglegaps':
       storage.setShowGaps(rawUid, !s.showGaps);
+      await ack();
+      return void (await backMore());
+    case 'newday':
+      storage.setNotifyNew(rawUid, !s.notifyNew);
       await ack();
       return void (await backMore());
     case 'format':
@@ -1201,6 +1211,7 @@ async function handleMessage(context) {
     const view = vm.buildHelpView();
     return void (await send(peerId, view));
   }
+  if (/^(боты|другие боты)(?=\s|$)/i.test(text)) return void (await send(peerId, vm.buildOtherBotsView()));
   if (/^звонки(?=\s|$)/i.test(text)) return void (await send(peerId, vm.bellView()));
   if (/^сейчас(?=\s|$)/i.test(text)) {
     const s = effState(rawUid);
@@ -1495,6 +1506,7 @@ function startSchedulers() {
   setInterval(reminderTick, 60 * 1000);
   setInterval(announceTick, 60 * 1000);
   setInterval(changeTick, 15 * 60 * 1000);
+  setInterval(newDayTick, 10 * 60 * 1000);
   setInterval(warmTick, 5 * 60 * 1000);
   setInterval(healthTick, 15 * 60 * 1000);
   setInterval(pauseReminderTick, 60 * 60 * 1000);
@@ -1838,6 +1850,62 @@ async function changeTick() {
       }
       await new Promise((r) => setTimeout(r, 60));
     }
+  }
+}
+
+// -------- «опубликовано расписание на новый день» (проверка раз в 10 минут) --------
+
+async function newDayTick() {
+  let fresh;
+  try {
+    fresh = await newDays.detectNewDays('vk');
+  } catch (err) {
+    log('DEBUG', `новый день: календарь недоступен: ${err.message}`);
+    return;
+  }
+  if (!fresh.length) return;
+
+  const users = storage
+    .newDayRecipients()
+    .map((u) => ({ ...u, myId: myLinkedId(u) }))
+    .filter((u) => u.myId && !isPaused(u.pausedUntil));
+
+  for (const iso of fresh) {
+    const target = D.partsFromIso(iso);
+    if (!target) continue;
+    let csvText;
+    let humanUrl = null;
+    try {
+      const r = await ss.fetchDayCsv(target, 0);
+      csvText = r.csvText;
+      humanUrl = r.humanUrl;
+    } catch {
+      continue; // таблица ещё не читается — повторим на следующем тике
+    }
+    let sent = 0;
+    for (const u of users) {
+      if (storage.getPlatformLastSent(u.myId) === iso) continue; // этот день уже пришёл рассылкой
+      const subj = subjOf(u);
+      if (!subj) continue;
+      let data;
+      try {
+        data = buildDayData(csvText, subj, target, { showGaps: u.showGaps });
+      } catch {
+        continue;
+      }
+      if (!data || data.note) continue; // у группы в этот день пар нет — не шумим
+      try {
+        const body = vm.scheduleMessage(attachNotes(data, u.userId, iso), humanUrl, storage.getPlatformFormat(u.myId));
+        await send(u.myId.slice(3), { text: `🆕 Опубликовано расписание на ${D.fmtDM(target)} (${D.weekdayRu(target)}):` });
+        await send(u.myId.slice(3), body);
+        sent += 1;
+      } catch (err) {
+        log('WARN', `новый день ${u.myId}: ${err.message || err}`);
+      }
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    newDays.markSeen('vk', iso);
+    log('INFO', `новый день ${iso}: уведомлений отправлено ${sent}`);
   }
 }
 

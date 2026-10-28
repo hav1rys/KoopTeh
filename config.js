@@ -124,6 +124,12 @@ module.exports = {
   // Telegram- и VK-боты обычно подключаются вместе с Discord-ботом из bot.js —
   // один процесс, общий users.json (см. bot.js). Каждый включается своим токеном;
   // можно запускать и по отдельности (npm run telegram / npm run vk).
+  // Ссылки на все три бота — для кнопки «🤖 Другие боты».
+  botLinks: {
+    telegram: '@KoopTehSchedul',
+    vk: 'https://vk.ru/club241529778',
+    discord: 'https://discord.com/oauth2/authorize?client_id=1545320545673945099',
+  },
   telegramToken: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
   telegramAdminId: (process.env.TELEGRAM_ADMIN_ID || '').trim(),
 

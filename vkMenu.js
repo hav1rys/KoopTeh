@@ -149,6 +149,20 @@ function buildHelpView() {
     b('⚙️ Настройки'),
     'Группа и роль · рассылка (время/дни) · пауза · напоминания · утро (+ своё приветствие) · формат текст/картинка · 🏘 не из города (погода дома + автобус)',
   ].join('\n');
+  return {
+    text,
+    keyboard: [[{ text: '🤖 Другие боты', callback_data: 'menu:bots' }], [{ text: '← В меню', callback_data: 'menu:refresh' }]],
+  };
+}
+
+// ---- Другие боты ------------------------------------------------------
+
+function buildOtherBotsView() {
+  const text = [
+    '🤖 Другие боты:',
+    `- Telegram: ${cfg.botLinks.telegram}`,
+    `- Discord: ${cfg.botLinks.discord}`,
+  ].join('\n');
   return { text, keyboard: [[{ text: '← В меню', callback_data: 'menu:refresh' }]] };
 }
 
@@ -203,6 +217,7 @@ function buildSettingsMoreView(s) {
     b('⚙️ Ещё настройки'),
     `⏰ Напоминания: ${s.reminderMinutes ? `за ${s.reminderMinutes} мин` : 'выкл'}`,
     `☀️ Утро: ${s.morning ? s.morningTime : 'выкл'}`,
+    `🆕 Новое расписание: ${s.notifyNew ? 'уведомлять' : 'выкл'}`,
     `🏘 Не из города: ${s.away && s.homePlace ? s.homePlace : '—'}`,
     `🖼 Формат: ${fmtLabel(s.format)}`,
     `🌤 Формат погоды: ${fmtLabel(s.weatherFormat)}`,
@@ -219,6 +234,7 @@ function buildSettingsMoreView(s) {
       { text: `Формат: ${fmtLabel(s.format)}`, callback_data: 'set:format' },
       { text: `Погода: ${fmtLabel(s.weatherFormat)}`, callback_data: 'set:wthrformat' },
     ],
+    [{ text: s.notifyNew ? '🆕 Новое расписание: вкл' : '🆕 Новое расписание: выкл', callback_data: 'set:newday' }],
     [
       { text: '🔗 Связать', callback_data: 'set:link' },
       { text: '← Назад', callback_data: 'set:moreback' },
@@ -871,6 +887,7 @@ module.exports = {
   weatherText,
   buildWeatherPanel,
   buildBusView,
+  buildOtherBotsView,
   buildAdminMenu,
   buildAdminLogView,
   buildSchedAnnView,

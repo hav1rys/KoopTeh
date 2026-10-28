@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const cfg = require('./config');
 
 const FILE = path.resolve(cfg.dataFile);
-let data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {}, platformPrefs: {} };
+let data = { users: {}, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {}, platformPrefs: {}, newDaySeen: {} };
 
 function load() {
   let raw;
@@ -41,6 +41,7 @@ function load() {
       aliases: isObj(raw.aliases) ? raw.aliases : {},
       linkCodes: isObj(raw.linkCodes) ? raw.linkCodes : {},
       platformPrefs: isObj(raw.platformPrefs) ? raw.platformPrefs : {},
+      newDaySeen: isObj(raw.newDaySeen) ? raw.newDaySeen : {},
     };
   } else if (isObj(raw)) {
     data = { users: raw, questions: {}, digests: {}, admins: [], aliases: {}, linkCodes: {}, platformPrefs: {} };
@@ -52,6 +53,7 @@ function load() {
   if (!isObj(data.aliases)) data.aliases = {};
   if (!isObj(data.linkCodes)) data.linkCodes = {};
   if (!isObj(data.platformPrefs)) data.platformPrefs = {};
+  if (!isObj(data.newDaySeen)) data.newDaySeen = {};
   if (!data.admins.length && cfg.adminId) data.admins = [String(cfg.adminId)];
   migrateDigests();
 }
@@ -105,6 +107,7 @@ function get(userId) {
     morning: Boolean(r.morning),
     morningTime: r.morningTime || '07:30',
     morningGreeting: r.morningGreeting || null,
+    notifyNew: Boolean(r.notifyNew),
     pausedUntil: r.pausedUntil || null,
     theme: r.theme || 'default',
     away: Boolean(r.away),
@@ -168,6 +171,11 @@ function setReminder(userId, minutes) {
 
 function setMorning(userId, value) {
   rec(userId).morning = Boolean(value);
+  save();
+}
+
+function setNotifyNew(userId, value) {
+  rec(userId).notifyNew = Boolean(value);
   save();
 }
 
@@ -339,30 +347,50 @@ function purgeOldNotes(todayIso) {
 // linkedIds: все "сырые" id площадок этого профиля, каждый бот сам находит в
 // нём id своей площадки (isTgId/isVkId/иначе) и по нему уже спрашивает
 // storage.getPlatformFormat/getPlatformLastSent и т.д.
+const toSubscriber = (userId, r) => ({
+  userId,
+  linkedIds: linkedIds(userId),
+  group: r.group || null,
+  teacherName: r.teacherName || null,
+  role: r.role === 'teacher' ? 'teacher' : 'student',
+  time: r.time || null,
+  days: Array.isArray(r.days) ? r.days : null,
+  showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
+  reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
+  morning: Boolean(r.morning),
+  morningTime: r.morningTime || '07:30',
+  morningGreeting: r.morningGreeting || null,
+  notifyNew: Boolean(r.notifyNew),
+  pausedUntil: r.pausedUntil || null,
+  theme: r.theme || 'default',
+  away: Boolean(r.away),
+  homePlace: r.homePlace || null,
+  homeStop: r.homeStop || null,
+  homeLat: typeof r.homeLat === 'number' ? r.homeLat : null,
+  homeLon: typeof r.homeLon === 'number' ? r.homeLon : null,
+});
+
 function subscribers() {
   return Object.entries(data.users)
     .filter(([, r]) => r && (r.group || r.teacherName) && r.subscribed)
-    .map(([userId, r]) => ({
-      userId,
-      linkedIds: linkedIds(userId),
-      group: r.group || null,
-      teacherName: r.teacherName || null,
-      role: r.role === 'teacher' ? 'teacher' : 'student',
-      time: r.time || null,
-      days: Array.isArray(r.days) ? r.days : null,
-      showGaps: r.showGaps === undefined ? true : Boolean(r.showGaps),
-      reminderMinutes: Number.isInteger(r.reminderMinutes) && r.reminderMinutes > 0 ? r.reminderMinutes : 0,
-      morning: Boolean(r.morning),
-      morningTime: r.morningTime || '07:30',
-      morningGreeting: r.morningGreeting || null,
-      pausedUntil: r.pausedUntil || null,
-      theme: r.theme || 'default',
-      away: Boolean(r.away),
-      homePlace: r.homePlace || null,
-      homeStop: r.homeStop || null,
-      homeLat: typeof r.homeLat === 'number' ? r.homeLat : null,
-      homeLon: typeof r.homeLon === 'number' ? r.homeLon : null,
-    }));
+    .map(([userId, r]) => toSubscriber(userId, r));
+}
+
+/** Кому слать «опубликовано расписание на новый день»: включили настройку (рассылка при этом может быть и выключена). */
+function newDayRecipients() {
+  return Object.entries(data.users)
+    .filter(([, r]) => r && (r.group || r.teacherName) && r.notifyNew)
+    .map(([userId, r]) => toSubscriber(userId, r));
+}
+
+// ---- «новые дни»: какие опубликованные дни площадка уже видела --------------
+// namespace: 'ds' | 'tg' | 'vk' (у каждой площадки свой набор — иначе первая же
+// сработавшая забирала бы новость у остальных). null = ещё не инициализировано.
+
+const getNewDaySeen = (ns) => (Array.isArray(data.newDaySeen[ns]) ? data.newDaySeen[ns] : null);
+function setNewDaySeen(ns, isoList) {
+  data.newDaySeen[ns] = [...new Set(isoList)].sort();
+  save();
 }
 
 // ---- вопросы администратору --------------------------------------
@@ -628,6 +656,10 @@ module.exports = {
   setShowGaps,
   setReminder,
   setMorning,
+  setNotifyNew,
+  newDayRecipients,
+  getNewDaySeen,
+  setNewDaySeen,
   setMorningTime,
   setMorningGreeting,
   setTheme,
