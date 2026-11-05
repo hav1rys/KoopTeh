@@ -582,7 +582,9 @@ function buildEntries(blocks, group, weekend = false) {
 
     if (groupCell) {
       if (!start) [start, end] = timeFromCell(groupCell);
-      const pn = pair ?? pairNoFromCell(groupCell);
+      // В новом XLSX номера в одной строке могут различаться по группам.
+      // Номер выбранной колонки важнее резервного номера строки.
+      const pn = pairNoFromCell(groupCell) ?? pair;
       [start, end] = fillTime(start, end, pn);
       const p = parseLesson(groupCell);
       const combinedWith = findCombinedGroups(chosen.header, row, col, p);
@@ -597,7 +599,7 @@ function buildEntries(blocks, group, weekend = false) {
     if (filled.length === 1 && filled[0][0] === firstCol) {
       let [s, e] = [start, end];
       if (!s) [s, e] = timeFromCell(filled[0][1]);
-      const pn = pair ?? pairNoFromCell(filled[0][1]);
+      const pn = pairNoFromCell(filled[0][1]) ?? pair;
       [s, e] = fillTime(s, e, pn);
       const p = parseLesson(filled[0][1]);
       entries.push({ kind: 'event', pair: pn, start: s, end: e, ...p, line: lessonLine(p) });
@@ -704,7 +706,7 @@ function buildTeacherData(csvText, surname, target) {
         if (!cell) continue;
         const p = parseLesson(cell);
         if (!p.teacher || normName(p.teacher.split(' ')[0]) !== want) continue;
-        const pn = pair ?? pairNoFromCell(cell);
+        const pn = pairNoFromCell(cell) ?? pair;
         let [s, e] = start ? [start, end] : timeFromCell(cell);
         if (!s) [s, e] = bellTime(pn, weekend);
         const hdrGroups = String(b.header[i] || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -854,7 +856,7 @@ function searchSchedule(csvText, { room = '', teacher = '' }, target) {
         const roomOk = !wantRoom || String(p.room).replace(/\s+/g, '').toLowerCase() === wantRoom;
         const teacherOk = !wantTeacher || (p.teacher && normName(p.teacher.split(' ')[0]) === wantTeacher);
         if (!(roomOk && teacherOk)) continue;
-        const pn = pair ?? pairNoFromCell(cell);
+        const pn = pairNoFromCell(cell) ?? pair;
         let [s, e] = start ? [start, end] : timeFromCell(cell);
         if (!s) [s, e] = bellTime(pn, weekend);
         const hdrGroups = String(b.header[i] || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -903,7 +905,7 @@ function freeRooms(csvText, target, pairNo) {
         const room = parseLesson(cell).room.trim();
         if (!looksLikeRoom(room)) continue;
         known.add(room);
-        const cp = rowPair ?? pairNoFromCell(cell);
+        const cp = pairNoFromCell(cell) ?? rowPair;
         if (cp === pairNo) busy.add(room);
       }
     }
