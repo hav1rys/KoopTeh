@@ -126,7 +126,7 @@ module.exports = {
   // можно запускать и по отдельности (npm run telegram / npm run vk).
   // Ссылки на все три бота — для кнопки «🤖 Другие боты».
   botLinks: {
-    telegram: '@KoopTehSchedul',
+    telegram: '@KoopTehSchedule_Bot',
     vk: 'https://vk.ru/club241529778',
     discord: 'https://discord.com/oauth2/authorize?client_id=1545320545673945099',
   },

@@ -126,6 +126,34 @@ test('извлечение ссылок из HTML-календаря', () => {
   assert.equal(links.get(10), 'https://docs.google.com/spreadsheets/d/NOGID123/export?format=csv');
 });
 
+test('календарь с двумя месяцами: число дня не путается между месяцами', () => {
+  const a = (id, n) => `<td><a href="https://docs.google.com/spreadsheets/d/${id}/edit?usp=sharing">${n}</a></td>`;
+  const html =
+    '<h3><a href="https://docs.google.com/spreadsheets/d/RETAKE1/edit">График пересдачи задолженности летней сессии 2025-2026 уч.года</a></h3>' +
+    '<p><strong><span>Октябрь, 2026</span></strong></p><table><tr>' + a('OCT01', '01') + a('OCT02', '02') + a('OCT05', '05') + '</tr></table>' +
+    '<p><strong>Ноябрь, 2026</strong></p><table><tr>' + a('NOV02', '02') + a('NOV03', '03') + '</tr></table>';
+  const links = ss.extractSheetLinks(html);
+  const url = (id) => `https://docs.google.com/spreadsheets/d/${id}/export?format=csv`;
+  assert.equal(ss.findSheetUrl(links, { y: 2026, mo: 10, d: 2 }), url('OCT02'));
+  assert.equal(ss.findSheetUrl(links, { y: 2026, mo: 11, d: 2 }), url('NOV02'));
+  assert.equal(ss.findSheetUrl(links, { y: 2026, mo: 11, d: 3 }), url('NOV03'));
+  // 01.11 и 05.11 не опубликованы: нельзя подсовывать таблицы 01.10 / 05.10
+  assert.equal(ss.findSheetUrl(links, { y: 2026, mo: 11, d: 1 }), null);
+  assert.equal(ss.findSheetUrl(links, { y: 2026, mo: 11, d: 5 }), null);
+  // длинная ссылка («График пересдачи…») не считается днём календаря
+  assert.ok(![...links.values()].some((u) => u.includes('RETAKE1')));
+});
+
+test('защита от чужого дня: дата внутри таблицы должна совпасть с запрошенной', async () => {
+  const csv = ',,,\n03.11.2026 вторник,"109Б",109РУ-1,\n,1.Литература,,\n';
+  assert.deepEqual(ss.sheetBlockDates(csv), ['2026-11-03']);
+  await ss.assertSheetIsForDate('x', csv, { y: 2026, mo: 11, d: 3 });
+  await assert.rejects(
+    () => ss.assertSheetIsForDate('x', csv, { y: 2026, mo: 11, d: 1 }),
+    (e) => e instanceof ss.NotPublishedError,
+  );
+});
+
 test('humanSheetUrl: из любой ссылки -> человекочитаемый /edit', () => {
   assert.equal(
     ss.humanSheetUrl('https://docs.google.com/spreadsheets/d/ABC_123/export?format=csv&gid=77'),

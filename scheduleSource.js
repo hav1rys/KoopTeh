@@ -5,6 +5,8 @@
 // (Кэшируется только список групп — он меняется редко.)
 
 const crypto = require('crypto');
+const ExcelJS = require('exceljs');
+const JSZip = require('jszip');
 const cfg = require('./config');
 const D = require('./dates');
 
@@ -127,10 +129,16 @@ function extractSheetLinks(html) {
     const hrefM = /href\s*=\s*"([^"]+)"/i.exec(chunk) || /href\s*=\s*'([^']+)'/i.exec(chunk);
     if (!hrefM) continue;
     const href = decodeEntities(hrefM[1]);
-    if (!/docs\.google\.com\/spreadsheets/i.test(href)) continue;
-    const sid = sheetId(href);
-    if (!sid) continue;
-    const csvUrl = csvExportUrl(sid.id, sid.published, gidFromHref(href));
+    let csvUrl;
+    if (/docs\.google\.com\/spreadsheets/i.test(href)) {
+      const sid = sheetId(href);
+      if (!sid) continue;
+      csvUrl = csvExportUrl(sid.id, sid.published, gidFromHref(href));
+    } else {
+      const disk = /^https?:\/\/(?:disk\.yandex\.(?:ru|com)|yadi\.sk)\/(?:i|d)\/([a-z\d_-]+)/i.exec(href);
+      if (!disk) continue;
+      csvUrl = `https://disk.yandex.ru/i/${disk[1]}`;
+    }
 
     const anchorText = stripTags(chunk).replace(/\s+/g, ' ').trim();
 
@@ -201,14 +209,9 @@ async function listPublishedDays(calendarUrl = cfg.calendarUrl) {
 /** Ссылка на CSV самого позднего опубликованного дня (последняя ссылка на странице). */
 async function resolveLatestSheetUrl(calendarUrl) {
   const html = await calendarHtml(calendarUrl);
-  const hrefs = [...html.matchAll(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/gi)]
-    .map((x) => decodeEntities(x[1]))
-    .filter((h) => /docs\.google\.com\/spreadsheets/i.test(h));
-  if (!hrefs.length) throw new NotPublishedError('на странице нет опубликованных таблиц');
-  const href = hrefs[hrefs.length - 1];
-  const sid = sheetId(href);
-  if (!sid) throw new UnavailableError('не удалось разобрать ссылку на таблицу');
-  return csvExportUrl(sid.id, sid.published, gidFromHref(href));
+  const links = [...extractSheetLinks(html).values()];
+  if (!links.length) throw new NotPublishedError('на странице нет опубликованных таблиц');
+  return links[links.length - 1];
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +233,95 @@ async function fetchCsvOnce(url) {
  * с известным gid листа расписания (cfg.scheduleGid).
  */
 async function downloadCsv(url) {
+  if (/^https?:\/\/(?:disk\.yandex\.(?:ru|com)|yadi\.sk)\/(?:i|d)\//i.test(url)) {
+    const api = new URL('https://cloud-api.yandex.net/v1/disk/public/resources/download');
+    api.searchParams.set('public_key', url);
+    const { body } = await httpGet(api.toString());
+    let href;
+    try {
+      href = JSON.parse(body).href;
+    } catch {
+      throw new UnavailableError('Яндекс Диск вернул некорректный ответ при получении ссылки на XLSX');
+    }
+    if (!href) throw new UnavailableError('Яндекс Диск не вернул ссылку на скачивание XLSX');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), cfg.httpTimeout);
+    try {
+      const res = await fetch(href, { redirect: 'follow', signal: ctrl.signal, headers: { 'User-Agent': UA } });
+      if (!res.ok) throw new UnavailableError(`HTTP ${res.status} при скачивании XLSX с Яндекс Диска`);
+      const buffer = Buffer.from(await res.arrayBuffer());
+      if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+        throw new UnavailableError('Яндекс Диск вернул не XLSX-файл');
+      }
+      // Файлы, опубликованные сайтом, используют namespace-префикс `s:` во
+      // всех тегах листа. ExcelJS не распознаёт такой корневой тег worksheet,
+      // поэтому нормализуем только XML листов внутри XLSX-архива перед чтением.
+      const zip = await JSZip.loadAsync(buffer);
+      for (const name of Object.keys(zip.files)) {
+        if (!/^xl\/.*\.xml$/i.test(name)) continue;
+        const file = zip.file(name);
+        if (!file) continue;
+        const xml = await file.async('string');
+        const normalized = xml.replace(/(<\/?)([A-Za-z_][\w.-]*):/g, '$1');
+        if (normalized !== xml) zip.file(name, normalized);
+      }
+      const workbookBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(workbookBuffer);
+      const worksheet = workbook.worksheets[0];
+      if (!worksheet) throw new UnavailableError('В XLSX нет листа с расписанием');
+      const quote = (value) => {
+        const text = String(value ?? '');
+        return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+      };
+      const rows = [];
+      worksheet.eachRow({ includeEmpty: true }, (row) => {
+        const values = [];
+        for (let col = 1; col <= worksheet.columnCount; col++) {
+          const cell = row.getCell(col);
+          if (cell.isMerged && cell.address !== cell.master.address) {
+            values.push('');
+            continue;
+          }
+          const sourceCell = cell.isMerged ? cell.master : cell;
+          const value = sourceCell.value;
+          const text = value == null ? '' : String(sourceCell.text ?? value);
+          values.push(text);
+        }
+        rows.push(values);
+      });
+
+      // Новый шаблон техникума хранит номер пары в начале ячейки занятия,
+      // а группы начинаются со столбца B. Приводим его к внутреннему прежнему
+      // виду: дата + пустой столбец времени + группы, затем номер пары + ячейки.
+      // Это позволяет оставить общими парсер, поиск, преподавателей и кабинеты.
+      const output = [];
+      let compactLayout = false;
+      for (const row of rows) {
+        const first = String(row[0] || '').trim();
+        const date = /(\d{2}\.\d{2}\.\d{4})/.exec(first);
+        const cells = row.slice(1);
+        const filled = cells.map((v) => String(v || '').trim()).filter(Boolean);
+        const groupHeader = date && filled.length > 0 && filled.every((v) => pairNoFromCell(v) == null);
+        if (groupHeader && String(row[1] || '').trim() && pairNoFromCell(row[1]) == null) {
+          compactLayout = true;
+          output.push([date[1], '', ...cells]);
+        } else if (compactLayout && date) {
+          const pair = cells.map(pairNoFromCell).find((v) => v != null);
+          output.push(['', pair == null ? '' : `${pair}.`, ...cells]);
+        } else {
+          output.push(row);
+        }
+      }
+      return output.map((row) => row.map(quote).join(',')).join('\n');
+    } catch (err) {
+      if (err instanceof UnavailableError) throw err;
+      throw new UnavailableError(`не удалось прочитать XLSX с Яндекс Диска: ${err.message || err}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   const candidates = [url];
   const idM = /\/spreadsheets\/d\/(?:e\/)?([a-zA-Z0-9_-]+)/.exec(url);
   if (idM) {
@@ -866,6 +958,7 @@ function diffRows(oldRows, newRows) {
 
 /** Человекочитаемая ссылка на таблицу-источник (для проверки пользователем). */
 function humanSheetUrl(anyUrl) {
+  if (/^https?:\/\/(?:disk\.yandex\.(?:ru|com)|yadi\.sk)\/(?:i|d)\//i.test(anyUrl || '')) return anyUrl;
   const m = /\/spreadsheets\/d\/(?:e\/)?([a-zA-Z0-9_-]+)/.exec(anyUrl || '');
   return m ? `https://docs.google.com/spreadsheets/d/${m[1]}/edit` : null;
 }
